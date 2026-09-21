@@ -38,7 +38,7 @@ async function enrich(t){
   const a=await getJSON(`https://api.dexscreener.com/token-pairs/v1/solana/${encodeURIComponent(t.mint)}`);
   const p=Array.isArray(a)?a.filter(x=>x?.chainId==="solana").sort((a,b)=>(+b?.liquidity?.usd||0)-(+a?.liquidity?.usd||0))[0]:null;
   let r=null;try{const z=await getJSON(`https://api.rugcheck.xyz/v1/tokens/${encodeURIComponent(t.mint)}/report`);const raw=+z?.score;r={scoreRaw:Number.isFinite(raw)?raw:null,scoreNormalized:Number.isFinite(raw)?Math.max(0,Math.min(100,raw>100?raw/200:raw)):null,rugged:!!z?.rugged};}catch{}
-  updateLearning(t,p);return{...t,pair:p,rug:r,signal:scoreSignal(p,r,trendFor(t)),updatedAt:Date.now()}
+  updateLearning(t,p);return{...t,pair:p,rug:r,signal:scoreSignal(p,r,trendFor(t)),chart:(history.get(t.mint)||[]).slice(-60),updatedAt:Date.now()}
  }catch{return{...t,pair:null,rug:null,signal:scoreSignal(null,null,trendFor(t)),updatedAt:Date.now()}}
 }
 async function add(e){
