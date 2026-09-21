@@ -36,9 +36,9 @@ function candidateScore(t){
 async function enrich(t){
  try{
   const a=await getJSON(`https://api.dexscreener.com/token-pairs/v1/solana/${encodeURIComponent(t.mint)}`);
-  const p=Array.isArray(a)?a.filter(x=>x?.chainId==="solana").sort((a,b)=>(+b?.liquidity?.usd||0)-(+a?.liquidity?.usd||0))[0]:null;
+  const pairs=Array.isArray(a)?a:(Array.isArray(a?.pairs)?a.pairs:[]); const p=pairs.filter(x=>x?.chainId==="solana").sort((a,b)=>(+b?.liquidity?.usd||0)-(+a?.liquidity?.usd||0))[0]||null;
   let r=null;try{const z=await getJSON(`https://api.rugcheck.xyz/v1/tokens/${encodeURIComponent(t.mint)}/report`);const raw=+z?.score;r={scoreRaw:Number.isFinite(raw)?raw:null,scoreNormalized:Number.isFinite(raw)?Math.max(0,Math.min(100,raw>100?raw/200:raw)):null,rugged:!!z?.rugged};}catch{}
-  updateLearning(t,p);return{...t,pair:p,rug:r,signal:scoreSignal(p,r,trendFor(t)),chart:(history.get(t.mint)||[]).slice(-60),updatedAt:Date.now()}
+  updateLearning(t,p);const name=p?.baseToken?.name&&p.baseToken.name!=="Unknown"?p.baseToken.name:t.name;const symbol=p?.baseToken?.symbol&&p.baseToken.symbol!=="TOKEN"?p.baseToken.symbol:t.symbol;return{...t,name,symbol,pair:p,rug:r,signal:scoreSignal(p,r,trendFor(t)),chart:(history.get(t.mint)||[]).slice(-60),updatedAt:Date.now()}
  }catch{return{...t,pair:null,rug:null,signal:scoreSignal(null,null,trendFor(t)),updatedAt:Date.now()}}
 }
 async function add(e){
@@ -59,15 +59,15 @@ async function walletData(address){
  return{address,balanceSol:((j?.result?.value||0)/1e9),network:"mainnet-beta"};
 }
 function agentAnswer(question){
- const c=getCalls();const q=String(question||"").toLowerCase();
- const top=c[0],high=c.filter(x=>x.signal.score>=68),risks=c.filter(x=>x.rug?.rugged||x.rug?.scoreNormalized>=60);
- let focus=top?{token:top.symbol,mint:top.mint,score:top.signal.score,call:top.callType,reasons:top.signal.reasons}:null;
- let answer=top?`Current scanner leader: ${top.symbol} at ${top.signal.score}/100. This is a BUY-WATCH signal, not a guaranteed buy. ${top.signal.reasons.join("; ")}.`: "No token currently meets the scanner's watch threshold.";
- if(q.includes("learn")||q.includes("study")||q.includes("market"))answer="I am tracking "+tokens.size+" tokens and "+learning.samples+" completed 5-minute outcome samples. Positive outcomes: "+learning.positive+". Negative outcomes: "+learning.negative+". More observations are used to calibrate the scanner over time; this is statistical learning, not a guarantee.";
- if(q.includes("chart"))answer="I study rolling price history plus momentum, 1h volume, liquidity, buy/sell flow, market cap and risk for each enriched token.";
- if(q.includes("risk")||q.includes("rug"))answer=`${risks.length} tracked tokens currently have elevated/flagged risk. Avoid treating a high momentum score as a safety signal; risk checks should override momentum.`;
- if(q.includes("call")||q.includes("buy")||q.includes("pick")||q.includes("interesting")||q.includes("100x"))answer=top?"Current high-upside watchlist: "+high.slice(0,5).map(x=>x.symbol+" ("+x.signal.score+")").join(", ")+" . The scanner cannot know which token will 100x; it ranks setups using liquidity, volume, momentum, flow, market-cap room and risk.":"There are no current high-upside candidates.";
- return{answer,focus,market:{tracked:tokens.size,candidates:high.length,riskFlags:risks.length,learningSamples:learning.samples},method:"Liquidity + volume + momentum + buyer/seller flow + market-cap room + RugCheck risk screening with rolling outcome learning. No predictive guarantee."};
+ const c=getCalls(),q=String(question||"").trim().toLowerCase(),top=c[0],high=c.slice(0,8),risks=[...tokens.values()].filter(x=>x.rug?.rugged||x.rug?.scoreNormalized>=60);
+ let answer="",focus=top?{token:top.symbol,name:top.name,mint:top.mint,score:top.signal.score,call:top.callType,reasons:top.signal.reasons}:null;
+ if(!q)answer="I’m here. Ask me about the current market, a token, the strongest setups, risk, charts, or what I’m learning.";
+ else if(q.includes("learn")||q.includes("study")||q.includes("market"))answer="Here’s what I’m learning: I’m tracking "+tokens.size+" tokens, "+learning.samples+" completed 5-minute outcome samples, with "+learning.positive+" positive and "+learning.negative+" negative outcomes. I combine rolling price observations with volume, liquidity, buy/sell flow, momentum, market-cap room and RugCheck risk, and update the context as new observations arrive. I will not pretend I can predict a future 100x.";
+ else if(q.includes("risk")||q.includes("rug"))answer=risks.length+" tracked tokens currently have elevated or flagged risk. My rule is to let risk override excitement: strong momentum does not make a risky token safe. Give me a ticker or mint and I can break down its liquidity, volume, flow, momentum and risk factors.";
+ else if(q.includes("call")||q.includes("buy")||q.includes("pick")||q.includes("interesting")||q.includes("100x"))answer=top?"My current research shortlist is "+high.map(x=>x.symbol+" ("+x.signal.score+"/100)").join(", ")+". I look for early activity with enough liquidity and volume to matter, improving momentum and buyer flow, market-cap room, and no major risk flag. A 100x cannot be predicted reliably; these are ranked research candidates, not guarantees.":"I don’t currently see a token that clears my opportunity filters. I’d rather show you nothing than fill the board with noise.";
+ else if(q.includes("chart"))answer="I’m studying rolling price history for each enriched token and combining it with 5m/1h price change, 1h volume, liquidity and transaction flow. The mini-chart shows the same direction I’m evaluating.";
+ else answer=top?"I’m seeing "+top.name+" ("+top.symbol+") as the current strongest qualified setup at "+top.signal.score+"/100. "+top.signal.reasons.join("; ")+". Ask me about a specific token and I can explain what is helping or hurting its score.":"Nothing currently clears my quality filters. Ask me to explain the filters or give me a token mint.";
+ return{answer,focus,market:{tracked:tokens.size,candidates:high.length,riskFlags:risks.length,learningSamples:learning.samples},method:"Conversational market analysis over live liquidity, volume, flow, momentum, market-cap room, rolling chart observations and RugCheck risk. No predictive guarantee."};
 }
 function connect(){
  try{const w=new WebSocket("wss://pumpportal.fun/api/data",{handshakeTimeout:15000});w.on("open",()=>{console.log("PumpPortal connected");w.send(JSON.stringify({method:"subscribeNewToken"}));w.send(JSON.stringify({method:"subscribeMigration"}));broadcast("status",{ok:true})});w.on("message",d=>{try{add(JSON.parse(String(d)))}catch{}});w.on("close",()=>{broadcast("status",{ok:false});setTimeout(connect,3000)});w.on("error",()=>broadcast("status",{ok:false}))}catch{setTimeout(connect,3000)}
