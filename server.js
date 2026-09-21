@@ -28,28 +28,59 @@ function trendFor(t){
  return{accel:(a.price/b.price-1)*100};
 }
 function candidateScore(t){
- const p=t.pair||{},s=t.signal||{},liq=+p.liquidity?.usd||0,vol=+p.volume?.h1||0,mc=+p.marketCap||+p.fdv||0;
- if(!p||s.score<62||liq<5000||vol<10000)return -1;
- if(t.rug?.rugged||(+t.rug?.scoreNormalized||0)>=60)return -1;
- return s.score+Math.min(10,Math.log10(Math.max(1,vol)))+(mc>0&&mc<5000000?8:0);
+ const p=t.pair||{},s=t.signal||{},liq=+p.liquidity?.usd||0,vol=+p.volume?.h1||0,mc=+p.marketCap||+p.fdv||0,age=p.pairCreatedAt?Math.max(0,(Date.now()-p.pairCreatedAt)/3600000):9999,tx=(+p.txns?.h1?.buys||0)+(+p.txns?.h1?.sells||0),vl=liq?vol/liq:0;
+ if(!p||s.score<62||liq<10000||vol<15000||tx<25)return -1;
+ if(t.rug?.rugged||(+t.rug?.scoreNormalized||0)>=45)return -1;
+ if(mc>25000000)return -1;
+ if(vl<1)return -1;
+ if(age<0)return -1;
+ return s.score + Math.min(12,Math.log10(Math.max(1,vol))) + (mc>0&&mc<5000000?7:0) + (age<=24?4:0) + (vl>=5?4:0);
+}
+function classify(t){
+ const p=t.pair||{},mc=+p.marketCap||+p.fdv||0,age=p.pairCreatedAt?Math.max(0,(Date.now()-p.pairCreatedAt)/3600000):9999;
+ if(t.rug?.rugged||+t.rug?.scoreNormalized>=45)return "RISK";
+ if(mc>25000000)return "ESTABLISHED";
+ if(age<=24)return "EARLY";
+ if(age<=72)return "DEVELOPING";
+ return "MOMENTUM";
+}
+function quality(t){
+ const p=t.pair||{};
+ return !!p && !!t.name && t.name!=="Unknown" && !!t.symbol && t.symbol!=="TOKEN";
 }
 async function enrich(t){
  try{
   const a=await getJSON(`https://api.dexscreener.com/token-pairs/v1/solana/${encodeURIComponent(t.mint)}`);
-  const pairs=Array.isArray(a)?a:(Array.isArray(a?.pairs)?a.pairs:[]); const p=pairs.filter(x=>x?.chainId==="solana").sort((a,b)=>(+b?.liquidity?.usd||0)-(+a?.liquidity?.usd||0))[0]||null;
-  let r=null;try{const z=await getJSON(`https://api.rugcheck.xyz/v1/tokens/${encodeURIComponent(t.mint)}/report`);const raw=+z?.score;r={scoreRaw:Number.isFinite(raw)?raw:null,scoreNormalized:Number.isFinite(raw)?Math.max(0,Math.min(100,raw>100?raw/200:raw)):null,rugged:!!z?.rugged};}catch{}
-  updateLearning(t,p);const name=p?.baseToken?.name&&p.baseToken.name!=="Unknown"?p.baseToken.name:t.name;const symbol=p?.baseToken?.symbol&&p.baseToken.symbol!=="TOKEN"?p.baseToken.symbol:t.symbol;return{...t,name,symbol,pair:p,rug:r,signal:scoreSignal(p,r,trendFor(t)),chart:(history.get(t.mint)||[]).slice(-60),updatedAt:Date.now()}
- }catch{return{...t,pair:null,rug:null,signal:scoreSignal(null,null,trendFor(t)),updatedAt:Date.now()}}
+  const pairs=Array.isArray(a)?a:(Array.isArray(a?.pairs)?a.pairs:[]);
+  const p=pairs.filter(x=>x?.chainId==="solana").sort((a,b)=>(+b?.liquidity?.usd||0)-(+a?.liquidity?.usd||0))[0]||null;
+  let meta={};
+  // PumpPortal's URI is often the best first-party launch metadata source.
+  if(t.uri){try{const m=await getJSON(t.uri);if(m&&typeof m==="object")meta=m}catch{}}
+  let r=null;
+  try{
+   const z=await getJSON(`https://api.rugcheck.xyz/v1/tokens/${encodeURIComponent(t.mint)}/report`);
+   const raw=+z?.score;
+   r={scoreRaw:Number.isFinite(raw)?raw:null,scoreNormalized:Number.isFinite(raw)?Math.max(0,Math.min(100,raw>100?raw/200:raw)):null,rugged:!!z?.rugged};
+  }catch{}
+  const name=(p?.baseToken?.name&&p.baseToken.name!=="Unknown"?p.baseToken.name:null)||(meta.name&&String(meta.name).trim())||(t.name&&t.name!=="Unknown"?t.name:null);
+  const symbol=(p?.baseToken?.symbol&&p.baseToken.symbol!=="TOKEN"?p.baseToken.symbol:null)||(meta.symbol&&String(meta.symbol).trim())||(t.symbol&&t.symbol!=="TOKEN"?t.symbol:null);
+  const merged={...t,name:name||"Metadata pending",symbol:symbol||"—",metadataImage:meta.image||meta.image_url||p?.info?.imageUrl||"",metadataDescription:meta.description||"",pair:p,rug:r};
+  updateLearning(merged,p);
+  return{...merged,signal:scoreSignal(p,r,trendFor(merged)),category:classify(merged),quality:quality(merged),chart:(history.get(t.mint)||[]).slice(-60),updatedAt:Date.now()};
+ }catch{return{...t,pair:null,rug:null,quality:false,category:"UNVERIFIED",signal:scoreSignal(null,null,trendFor(t)),updatedAt:Date.now()}}
 }
 async function add(e){
  if(!e?.mint)return;
- const t={mint:String(e.mint),name:String(e.name||"Unknown"),symbol:String(e.symbol||"TOKEN"),creator:String(e.traderPublicKey||""),uri:String(e.uri||""),createdAt:Number(e.created_timestamp||Date.now())};
+ const t={mint:String(e.mint),name:String(e.name||"Unknown"),symbol:String(e.symbol||"TOKEN"),creator:String(e.traderPublicKey||e.creator||""),uri:String(e.uri||""),createdAt:Number(e.created_timestamp||Date.now())};
  if(tokens.has(t.mint))return;
- tokens.set(t.mint,t);while(tokens.size>100)tokens.delete(tokens.keys().next().value);broadcast("token",t);
+ tokens.set(t.mint,t);while(tokens.size>500)tokens.delete(tokens.keys().next().value);
  const z=await enrich(t);tokens.set(t.mint,z);broadcast("update",z);
 }
 function getCalls(){
- return [...tokens.values()].filter(t=>candidateScore(t)>=70).map(t=>({...t,callType:t.signal.score>=82?"HIGH UPSIDE WATCH":t.signal.score>=74?"EARLY OPPORTUNITY":"MOMENTUM WATCH"})).sort((a,b)=>candidateScore(b)-candidateScore(a)).slice(0,20);
+ return [...tokens.values()].filter(t=>candidateScore(t)>=72&&quality(t)).map(t=>({...t,callType:t.signal.score>=82?"A-TIER WATCH":t.signal.score>=74?"QUALIFIED WATCH":"MOMENTUM WATCH"})).sort((a,b)=>candidateScore(b)-candidateScore(a)).slice(0,30);
+}
+function getRadar(){
+ return [...tokens.values()].filter(t=>t.pair&&quality(t)).sort((a,b)=>(b.signal?.score||0)-(a.signal?.score||0)).slice(0,100);
 }
 async function walletData(address){
  if(!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address))throw Error("Invalid Solana address");
@@ -59,15 +90,21 @@ async function walletData(address){
  return{address,balanceSol:((j?.result?.value||0)/1e9),network:"mainnet-beta"};
 }
 function agentAnswer(question){
- const c=getCalls(),q=String(question||"").trim().toLowerCase(),top=c[0],high=c.slice(0,8),risks=[...tokens.values()].filter(x=>x.rug?.rugged||x.rug?.scoreNormalized>=60);
- let answer="",focus=top?{token:top.symbol,name:top.name,mint:top.mint,score:top.signal.score,call:top.callType,reasons:top.signal.reasons}:null;
- if(!q)answer="I’m here. Ask me about the current market, a token, the strongest setups, risk, charts, or what I’m learning.";
- else if(q.includes("learn")||q.includes("study")||q.includes("market"))answer="Here’s what I’m learning: I’m tracking "+tokens.size+" tokens, "+learning.samples+" completed 5-minute outcome samples, with "+learning.positive+" positive and "+learning.negative+" negative outcomes. I combine rolling price observations with volume, liquidity, buy/sell flow, momentum, market-cap room and RugCheck risk, and update the context as new observations arrive. I will not pretend I can predict a future 100x.";
- else if(q.includes("risk")||q.includes("rug"))answer=risks.length+" tracked tokens currently have elevated or flagged risk. My rule is to let risk override excitement: strong momentum does not make a risky token safe. Give me a ticker or mint and I can break down its liquidity, volume, flow, momentum and risk factors.";
- else if(q.includes("call")||q.includes("buy")||q.includes("pick")||q.includes("interesting")||q.includes("100x"))answer=top?"My current research shortlist is "+high.map(x=>x.symbol+" ("+x.signal.score+"/100)").join(", ")+". I look for early activity with enough liquidity and volume to matter, improving momentum and buyer flow, market-cap room, and no major risk flag. A 100x cannot be predicted reliably; these are ranked research candidates, not guarantees.":"I don’t currently see a token that clears my opportunity filters. I’d rather show you nothing than fill the board with noise.";
- else if(q.includes("chart"))answer="I’m studying rolling price history for each enriched token and combining it with 5m/1h price change, 1h volume, liquidity and transaction flow. The mini-chart shows the same direction I’m evaluating.";
- else answer=top?"I’m seeing "+top.name+" ("+top.symbol+") as the current strongest qualified setup at "+top.signal.score+"/100. "+top.signal.reasons.join("; ")+". Ask me about a specific token and I can explain what is helping or hurting its score.":"Nothing currently clears my quality filters. Ask me to explain the filters or give me a token mint.";
- return{answer,focus,market:{tracked:tokens.size,candidates:high.length,riskFlags:risks.length,learningSamples:learning.samples},method:"Conversational market analysis over live liquidity, volume, flow, momentum, market-cap room, rolling chart observations and RugCheck risk. No predictive guarantee."};
+ const c=getCalls(),q=String(question||"").trim().toLowerCase(),top=c[0],high=c.slice(0,10),all=getRadar();
+ const risks=all.filter(x=>x.rug?.rugged||x.rug?.scoreNormalized>=45);
+ const early=all.filter(x=>x.category==="EARLY"&&candidateScore(x)>=60).slice(0,8);
+ const established=all.filter(x=>x.category==="ESTABLISHED").slice(0,5);
+ let answer="",focus=top?{token:top.symbol,name:top.name,mint:top.mint,score:top.signal.score,call:top.callType,reasons:top.signal.reasons,metrics:top.signal.metrics}:null;
+ if(!q)answer="I’m the market research layer. I can explain a token, compare candidates, inspect risk, explain a chart, describe the current market regime, or tell you why a token was rejected. I track evidence first and avoid inventing certainty.";
+ else if(q.includes("learn")||q.includes("study")||q.includes("how do you"))answer="I learn in a bounded way from observed outcomes: rolling price history, volume/liquidity, transaction flow, momentum and safety results. Right now I have "+tokens.size+" live tracked tokens and "+learning.samples+" completed 5-minute outcome samples ("+learning.positive+" positive / "+learning.negative+" negative). This process is not persistent across a server restart yet, so the next architecture step is durable market memory.";
+ else if(q.includes("risk")||q.includes("rug")||q.includes("scam"))answer="I treat safety as a gate, not a small score bonus. A RugCheck rug flag or elevated normalized risk can remove a token from qualified calls. I also reject thin liquidity, weak activity, weak volume/liquidity, and very large caps from the early-opportunity board. "+risks.length+" tracked tokens currently show elevated safety risk.";
+ else if(q.includes("market")||q.includes("regime")||q.includes("economy"))answer="The scanner is watching the micro-regime: fresh-token flow, 5m/1h momentum, buyer/seller imbalance, volume relative to liquidity, pair age and market-cap expansion room. These are market-structure signals, not a claim about macroeconomic causality. I can also explain theories such as momentum, reflexivity, liquidity preference, attention/volume feedback and risk-of-ruin.";
+ else if(q.includes("call")||q.includes("buy")||q.includes("pick")||q.includes("interesting")||q.includes("100x"))answer=top?"My current qualified research set is "+high.map(x=>x.symbol+" ("+x.signal.score+"/100)").join(", ")+". I am explicitly filtering out large-cap established tokens, weak liquidity, low activity and elevated safety risk from this board. A 100x outcome is not something the data can reliably predict; the useful question is whether the current evidence shows asymmetric upside with survivable downside.":"No token currently clears the full quality gate. That is intentional: a blank board is preferable to promoting a weak or dangerous setup.";
+ else if(q.includes("chart"))answer="Chart analysis is not just the line. I combine the recent price path with 5m/1h change, transaction count, buy/sell balance, volume-to-liquidity, pair age and safety. A sharp rise with deteriorating flow or weak liquidity is treated differently from a rise supported by broader activity.";
+ else if(q.includes("early")||q.includes("new"))answer=early.length?"Early candidates right now: "+early.map(x=>x.symbol+" ("+x.signal.score+")").join(", ")+". These are fresh, active candidates that still need safety and liquidity confirmation.":"There are no fresh candidates currently clearing the early-opportunity gates.";
+ else if(q.includes("established")||q.includes("large"))answer=established.length?"Established movers are kept separate from early opportunities: "+established.map(x=>x.symbol).join(", ")+".":"No established movers are currently enriched.";
+ else answer=top?"The strongest qualified setup I currently see is "+top.name+" ("+top.symbol+") at "+top.signal.score+"/100. Evidence: "+top.signal.reasons.join("; ")+". Key metrics: liquidity "+Math.round(+top.pair.liquidity?.usd||0)+", 1h volume "+Math.round(+top.pair.volume?.h1||0)+", buy ratio "+((top.signal.metrics?.buyRatio||0)*100).toFixed(0)+"%, age "+(top.signal.metrics?.ageHours||0).toFixed(1)+"h. Ask me for the token mint if you want a full breakdown.":"Nothing currently clears the quality gate.";
+ return{answer,focus,market:{tracked:tokens.size,candidates:high.length,riskFlags:risks.length,early:early.length,established:established.length,learningSamples:learning.samples},method:"Multi-factor market research: metadata verification, liquidity, volume/liquidity, transaction breadth, buy/sell flow, 5m/1h momentum, pair age, market-cap room and RugCheck safety gates. No guaranteed-profit or 100x prediction."};
 }
 function connect(){
  try{const w=new WebSocket("wss://pumpportal.fun/api/data",{handshakeTimeout:15000});w.on("open",()=>{console.log("PumpPortal connected");w.send(JSON.stringify({method:"subscribeNewToken"}));w.send(JSON.stringify({method:"subscribeMigration"}));broadcast("status",{ok:true})});w.on("message",d=>{try{add(JSON.parse(String(d)))}catch{}});w.on("close",()=>{broadcast("status",{ok:false});setTimeout(connect,3000)});w.on("error",()=>broadcast("status",{ok:false}))}catch{setTimeout(connect,3000)}
@@ -76,6 +113,8 @@ setInterval(async()=>{for(const t of [...tokens.values()].slice(0,35)){const z=a
 http.createServer(async(req,res)=>{
  const u=new URL(req.url,`http://${req.headers.host||"localhost"}`);
  if(u.pathname==="/api/tokens")return send(res,200,[...tokens.values()]);
+ if(u.pathname==="/api/radar")return send(res,200,getRadar());
+ if(u.pathname==="/api/health")return send(res,200,{ok:true,tracked:tokens.size,qualified:getCalls().length,learningSamples:learning.samples,now:Date.now()});
  if(u.pathname==="/api/calls")return send(res,200,getCalls());
  if(u.pathname==="/api/wallet"){try{return send(res,200,await walletData(u.searchParams.get("address")||""))}catch(e){return send(res,400,{error:e.message})}}
  if(u.pathname==="/api/agent"){return send(res,200,agentAnswer(u.searchParams.get("q")||""))}
