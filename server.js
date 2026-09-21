@@ -1,5 +1,38 @@
-const http=require("http"),fs=require("fs"),path=require("path"),WebSocket=require("ws");const {URL}=require("url");
+const http=require("http"),fs=require("fs"),path=require("path"),WebSocket=require("ws");const {URL}=require("url");const {Pool}=require("pg");
 const PORT=Number(process.env.PORT||8787),PUBLIC=path.join(__dirname,"public"),clients=new Set(),tokens=new Map(),history=new Map(),learning={samples:0,positive:0,negative:0};
+const pool=process.env.DATABASE_URL?new Pool({connectionString:process.env.DATABASE_URL,ssl:{rejectUnauthorized:false},max:5}):null;
+let dbReady=false;
+async function initDB(){
+ if(!pool)return;
+ try{await pool.query(`CREATE TABLE IF NOT EXISTS token_observations(id BIGSERIAL PRIMARY KEY,mint TEXT NOT NULL,ts TIMESTAMPTZ NOT NULL DEFAULT now(),price NUMERIC,market_cap NUMERIC,liquidity NUMERIC,volume_h1 NUMERIC,buys_h1 INTEGER,sells_h1 INTEGER,risk NUMERIC,signal NUMERIC,name TEXT,symbol TEXT,category TEXT);
+ CREATE INDEX IF NOT EXISTS token_observations_mint_ts ON token_observations(mint,ts DESC);
+ CREATE TABLE IF NOT EXISTS agent_memory(id BIGSERIAL PRIMARY KEY,ts TIMESTAMPTZ NOT NULL DEFAULT now(),kind TEXT NOT NULL,mint TEXT,content TEXT NOT NULL);
+ CREATE INDEX IF NOT EXISTS agent_memory_ts ON agent_memory(ts DESC);`);
+ dbReady=true; console.log("Postgres learning store ready");
+ }catch(e){console.error("DB init failed:",e.message)}
+}
+async function persistObservation(t,p){
+ if(!dbReady||!p)return;
+ try{await pool.query(`INSERT INTO token_observations(mint,price,market_cap,liquidity,volume_h1,buys_h1,sells_h1,risk,signal,name,symbol,category) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+ [t.mint,+p.priceUsd||null,+p.marketCap||+p.fdv||null,+p.liquidity?.usd||null,+p.volume?.h1||null,+p.txns?.h1?.buys||0,+p.txns?.h1?.sells||0,t.rug?.scoreNormalized??null,t.signal?.score??null,t.name||null,t.symbol||null,t.category||null]);}
+ catch(e){console.error("DB observation failed:",e.message)}
+}
+async function persistentStats(){
+ if(!dbReady)return {observations:0,tokens:0,outcomes5m:0};
+ try{
+  const a=await pool.query("SELECT COUNT(*)::int n,COUNT(DISTINCT mint)::int tokens FROM token_observations");
+  const b=await pool.query(`SELECT COUNT(*)::int n FROM token_observations a WHERE EXISTS(SELECT 1 FROM token_observations b WHERE b.mint=a.mint AND b.ts BETWEEN a.ts+interval '5 minutes' AND a.ts+interval '7 minutes' AND b.price>a.price)`);
+  return{observations:a.rows[0].n,tokens:a.rows[0].tokens,outcomes5m:b.rows[0].n};
+ }catch{return{observations:0,tokens:0,outcomes5m:0}}
+}
+async function recentMemory(){
+ if(!dbReady)return[];
+ try{const r=await pool.query("SELECT ts,kind,mint,content FROM agent_memory ORDER BY ts DESC LIMIT 30");return r.rows}catch{return[]}
+}
+async function remember(kind,content,mint=null){
+ if(!dbReady)return;
+ try{await pool.query("INSERT INTO agent_memory(kind,mint,content) VALUES($1,$2,$3)",[kind,mint,content])}catch{}
+}
 const send=(r,c,d,extra={})=>{r.writeHead(c,{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store",...extra});r.end(JSON.stringify(d))};
 const broadcast=(e,d)=>{const x=`event: ${e}\ndata: ${JSON.stringify(d)}\n\n`;for(const r of clients){try{r.write(x)}catch{}}};
 const heartbeat=setInterval(()=>{for(const r of clients){try{r.write(`: heartbeat ${Date.now()}\n\n`)}catch{}}},10000);
@@ -74,7 +107,7 @@ async function enrich(t){
   const name=(p?.baseToken?.name&&p.baseToken.name!=="Unknown"?p.baseToken.name:null)||(meta.name&&String(meta.name).trim())||(t.name&&t.name!=="Unknown"?t.name:null);
   const symbol=(p?.baseToken?.symbol&&p.baseToken.symbol!=="TOKEN"?p.baseToken.symbol:null)||(meta.symbol&&String(meta.symbol).trim())||(t.symbol&&t.symbol!=="TOKEN"?t.symbol:null);
   const merged={...t,name:name||"Metadata pending",symbol:symbol||"—",metadataImage:meta.image||meta.image_url||p?.info?.imageUrl||"",metadataDescription:meta.description||"",pair:p,rug:r};
-  updateLearning(merged,p);
+  updateLearning(merged,p); persistObservation(merged,p);
   return{...merged,signal:scoreSignal(p,r,trendFor(merged)),category:classify(merged),quality:quality(merged),chart:(history.get(t.mint)||[]).slice(-60),updatedAt:Date.now()};
  }catch{return{...t,pair:null,rug:null,quality:false,category:"UNVERIFIED",signal:scoreSignal(null,null,trendFor(t)),updatedAt:Date.now()}}
 }
@@ -98,27 +131,38 @@ async function walletData(address){
  const r=await fetch(rpc,{method:"POST",headers:{"content-type":"application/json"},body});if(!r.ok)throw Error("RPC "+r.status);const j=await r.json();
  return{address,balanceSol:((j?.result?.value||0)/1e9),network:"mainnet-beta"};
 }
-function agentAnswer(question){
- const c=getCalls(),q=String(question||"").trim().toLowerCase(),top=c[0],high=c.slice(0,10),all=getRadar();
- const risks=all.filter(x=>x.rug?.rugged||x.rug?.scoreNormalized>=45);
- const early=all.filter(x=>x.category==="EARLY"&&candidateScore(x)>=60).slice(0,8);
- const established=all.filter(x=>x.category==="ESTABLISHED").slice(0,5);
- let answer="",focus=top?{token:top.symbol,name:top.name,mint:top.mint,score:top.signal.score,call:top.callType,reasons:top.signal.reasons,metrics:top.signal.metrics}:null;
- if(!q)answer="I’m the market research layer. I can explain a token, compare candidates, inspect risk, explain a chart, describe the current market regime, or tell you why a token was rejected. I track evidence first and avoid inventing certainty.";
- else if(q.includes("learn")||q.includes("study")||q.includes("how do you"))answer="I learn in a bounded way from observed outcomes: rolling price history, volume/liquidity, transaction flow, momentum and safety results. Right now I have "+tokens.size+" live tracked tokens and "+learning.samples+" completed 5-minute outcome samples ("+learning.positive+" positive / "+learning.negative+" negative). This process is not persistent across a server restart yet, so the next architecture step is durable market memory.";
- else if(q.includes("risk")||q.includes("rug")||q.includes("scam"))answer="I treat safety as a gate, not a small score bonus. A RugCheck rug flag or elevated normalized risk can remove a token from qualified calls. I also reject thin liquidity, weak activity, weak volume/liquidity, and very large caps from the early-opportunity board. "+risks.length+" tracked tokens currently show elevated safety risk.";
- else if(q.includes("market")||q.includes("regime")||q.includes("economy"))answer="The scanner is watching the micro-regime: fresh-token flow, 5m/1h momentum, buyer/seller imbalance, volume relative to liquidity, pair age and market-cap expansion room. These are market-structure signals, not a claim about macroeconomic causality. I can also explain theories such as momentum, reflexivity, liquidity preference, attention/volume feedback and risk-of-ruin.";
- else if(q.includes("call")||q.includes("buy")||q.includes("pick")||q.includes("interesting")||q.includes("100x"))answer=top?"My current qualified research set is "+high.map(x=>x.symbol+" ("+x.signal.score+"/100)").join(", ")+". I am explicitly filtering out large-cap established tokens, weak liquidity, low activity and elevated safety risk from this board. A 100x outcome is not something the data can reliably predict; the useful question is whether the current evidence shows asymmetric upside with survivable downside.":"No token currently clears the full quality gate. That is intentional: a blank board is preferable to promoting a weak or dangerous setup.";
- else if(q.includes("chart"))answer="Chart analysis is not just the line. I combine the recent price path with 5m/1h change, transaction count, buy/sell balance, volume-to-liquidity, pair age and safety. A sharp rise with deteriorating flow or weak liquidity is treated differently from a rise supported by broader activity.";
- else if(q.includes("early")||q.includes("new"))answer=early.length?"Early candidates right now: "+early.map(x=>x.symbol+" ("+x.signal.score+")").join(", ")+". These are fresh, active candidates that still need safety and liquidity confirmation.":"There are no fresh candidates currently clearing the early-opportunity gates.";
- else if(q.includes("established")||q.includes("large"))answer=established.length?"Established movers are kept separate from early opportunities: "+established.map(x=>x.symbol).join(", ")+".":"No established movers are currently enriched.";
- else answer=top?"The strongest qualified setup I currently see is "+top.name+" ("+top.symbol+") at "+top.signal.score+"/100. Evidence: "+top.signal.reasons.join("; ")+". Key metrics: liquidity "+Math.round(+top.pair.liquidity?.usd||0)+", 1h volume "+Math.round(+top.pair.volume?.h1||0)+", buy ratio "+((top.signal.metrics?.buyRatio||0)*100).toFixed(0)+"%, age "+(top.signal.metrics?.ageHours||0).toFixed(1)+"h. Ask me for the token mint if you want a full breakdown.":"Nothing currently clears the quality gate.";
- return{answer,focus,market:{tracked:tokens.size,candidates:high.length,riskFlags:risks.length,early:early.length,established:established.length,learningSamples:learning.samples},method:"Multi-factor market research: metadata verification, liquidity, volume/liquidity, transaction breadth, buy/sell flow, 5m/1h momentum, pair age, market-cap room and RugCheck safety gates. No guaranteed-profit or 100x prediction."};
+async function llmAgent(question){
+ const key=process.env.OPENAI_API_KEY;
+ if(!key)return null;
+ const candidates=getCalls().slice(0,12).map(t=>({mint:t.mint,name:t.name,symbol:t.symbol,category:t.category,score:t.signal.score,reasons:t.signal.reasons,metrics:t.signal.metrics,price:t.pair?.priceUsd,mc:t.pair?.marketCap||t.pair?.fdv,liquidity:t.pair?.liquidity?.usd,volume1h:t.pair?.volume?.h1,buys:t.pair?.txns?.h1?.buys,sells:t.pair?.txns?.h1?.sells,risk:t.rug?.scoreNormalized}));
+ const mem=await recentMemory(),stats=await persistentStats();
+ const system=`You are PumpScope's live crypto market research agent. Speak naturally, deeply and clearly like a strong research analyst. Never invent live facts. The supplied market data is the source of truth. Explain evidence, uncertainty, risk, liquidity, market structure and alternative interpretations. Do not promise profits or claim a token will 100x. Distinguish observation from inference. If evidence is insufficient, say so. The scanner's qualified candidates are research candidates, not guaranteed buys. Persistent observations: ${stats.observations}; tracked historical tokens: ${stats.tokens}; positive 5m outcome observations: ${stats.outcomes5m}. Recent agent memory: ${JSON.stringify(mem)}. Current qualified candidates: ${JSON.stringify(candidates)}`;
+ try{
+  const r=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{"content-type":"application/json","authorization:"Bearer "+key},body:JSON.stringify({model:process.env.OPENAI_MODEL||"gpt-5.6-luna",instructions:system,input:question,reasoning:{effort:"medium"},max_output_tokens:900})});
+  if(!r.ok)throw Error("LLM "+r.status);
+  const j=await r.json();const text=j.output_text||j.output?.flatMap(x=>x.content||[]).map(x=>x.text||"").join("")||"";
+  if(!text)throw Error("empty LLM response");
+  await remember("conversation",JSON.stringify({q:question,a:text}));
+  return text;
+ }catch(e){console.error("LLM agent failed:",e.message);return null}
+}
+async function agentAnswer(question){
+ const ai=await llmAgent(question); if(ai)return{answer:ai,mode:"llm",market:{tracked:tokens.size,candidates:getCalls().length,learningSamples:learning.samples}};
+ const c=getCalls(),q=String(question||"").trim().toLowerCase(),top=c[0],high=c.slice(0,10),all=getRadar(),risks=all.filter(x=>x.rug?.rugged||x.rug?.scoreNormalized>=45),early=all.filter(x=>x.category==="EARLY"&&candidateScore(x)>=60).slice(0,8);
+ let answer;
+ if(!q)answer="I’m the market research layer. Ask me about a token, risk, charts, the current regime, qualified setups, or what the historical observations are learning.";
+ else if(q.includes("risk")||q.includes("rug")||q.includes("scam"))answer="Safety is a hard gate here. I exclude RugCheck flags/elevated risk, thin liquidity, weak activity and weak volume/liquidity from qualified opportunities. "+risks.length+" tracked tokens currently show elevated risk.";
+ else if(q.includes("learn")||q.includes("study")){const ps=await persistentStats();answer="The learning system now persists market observations in PostgreSQL. It has "+ps.observations+" observations across "+ps.tokens+" tokens, with "+ps.outcomes5m+" positive 5-minute follow-through observations in the persistent store. In-process learning currently has "+learning.samples+" samples. The next layer is calibration: measure which features actually predict future outcomes instead of assuming a feature is useful.";}
+ else if(q.includes("market")||q.includes("regime"))answer="I’m monitoring fresh-token flow, momentum, buyer/seller balance, liquidity, volume/liquidity, pair age and market-cap expansion room. Those are observable microstructure signals; they are not proof of a macroeconomic causal relationship.";
+ else if(q.includes("call")||q.includes("buy")||q.includes("pick")||q.includes("100x"))answer=top?"Current qualified research candidates: "+high.map(x=>x.symbol+" ("+x.signal.score+"/100)").join(", ")+". These pass the current gates; they are not guaranteed winners and a 100x cannot be reliably predicted.":"No token currently clears the full quality gate. The system intentionally prefers no call to a low-quality call.";
+ else answer=top?"The strongest current qualified candidate is "+top.name+" ("+top.symbol+") at "+top.signal.score+"/100. Evidence: "+top.signal.reasons.join("; ")+". Ask me for a specific mint for a deeper breakdown.":"Nothing currently clears the quality gate.";
+ return{answer,mode:"rules",market:{tracked:tokens.size,candidates:c.length,riskFlags:risks.length,early:early.length,learningSamples:learning.samples},method:"Live market data + risk gates + persistent observations + calibrated feature research."};
 }
 function connect(){
  try{const w=new WebSocket("wss://pumpportal.fun/api/data",{handshakeTimeout:15000});w.on("open",()=>{console.log("PumpPortal connected");w.send(JSON.stringify({method:"subscribeNewToken"}));w.send(JSON.stringify({method:"subscribeMigration"}));broadcast("status",{ok:true})});w.on("message",d=>{try{add(JSON.parse(String(d)))}catch{}});w.on("close",()=>{broadcast("status",{ok:false});setTimeout(connect,3000)});w.on("error",()=>broadcast("status",{ok:false}))}catch{setTimeout(connect,3000)}
 }
 setInterval(async()=>{for(const t of [...tokens.values()].slice(0,35)){const z=await enrich(t);tokens.set(t.mint,z);broadcast("update",z)}},15000);
+initDB().catch(()=>{});
 http.createServer(async(req,res)=>{
  const u=new URL(req.url,`http://${req.headers.host||"localhost"}`);
  if(u.pathname==="/api/tokens")return send(res,200,[...tokens.values()]);
@@ -126,7 +170,8 @@ http.createServer(async(req,res)=>{
  if(u.pathname==="/api/health")return send(res,200,{ok:true,tracked:tokens.size,qualified:getCalls().length,learningSamples:learning.samples,now:Date.now()});
  if(u.pathname==="/api/calls")return send(res,200,getCalls());
  if(u.pathname==="/api/wallet"){try{return send(res,200,await walletData(u.searchParams.get("address")||""))}catch(e){return send(res,400,{error:e.message})}}
- if(u.pathname==="/api/agent"){return send(res,200,agentAnswer(u.searchParams.get("q")||""))}
+ if(u.pathname==="/api/agent"){return send(res,200,await agentAnswer(u.searchParams.get("q")||""))}
+ if(u.pathname==="/api/learning"){return send(res,200,{persistent:await persistentStats(),inProcess:learning})}
  if(u.pathname==="/events"){res.writeHead(200,{"Content-Type":"text/event-stream; charset=utf-8","Cache-Control":"no-cache, no-transform","Connection":"keep-alive","Access-Control-Allow-Origin":"*","X-Accel-Buffering":"no"});res.write(`event: snapshot\ndata: ${JSON.stringify([...tokens.values()])}\n\n`);clients.add(res);req.on("close",()=>clients.delete(res));return}
  const f=path.join(PUBLIC,u.pathname==="/"?"index.html":u.pathname);if(!f.startsWith(PUBLIC))return send(res,403,{error:"forbidden"});
  fs.readFile(f,(e,d)=>{if(e)return send(res,404,{error:"not found"});const ct=path.extname(f)===".html"?"text/html; charset=utf-8":path.extname(f)===".js"?"text/javascript; charset=utf-8":"text/plain; charset=utf-8";res.writeHead(200,{"Content-Type":ct,"Cache-Control":"no-cache"});res.end(d)})
