@@ -4,9 +4,9 @@ const send=(r,c,d,extra={})=>{r.writeHead(c,{"Content-Type":"application/json; c
 const broadcast=(e,d)=>{const x=`event: ${e}\ndata: ${JSON.stringify(d)}\n\n`;for(const r of clients){try{r.write(x)}catch{}}};
 const heartbeat=setInterval(()=>{for(const r of clients){try{r.write(`: heartbeat ${Date.now()}\n\n`)}catch{}}},10000);
 async function getJSON(u){const r=await fetch(u,{headers:{accept:"application/json"}});if(!r.ok)throw Error(r.status);return r.json()}
-function scoreSignal(p,r){
+function scoreSignal(p,r,trend={}){
  const pc=+p?.priceChange?.m5||0,h=+p?.priceChange?.h1||0,b=+p?.txns?.h1?.buys||0,s=+p?.txns?.h1?.sells||0,l=+p?.liquidity?.usd||0,f=b+s?b/(b+s):.5;
- let x=50+pc*1.1+h*.22+(f-.5)*38+Math.min(12,Math.log10(Math.max(1,l))*2);
+ let x=40+pc*1.35+h*.28+(f-.5)*42+Math.min(14,Math.log10(Math.max(1,l))*2.4)+Math.min(12,Math.log10(Math.max(1,+p?.volume?.h1||0))*2)+Math.max(-8,Math.min(8,+trend.accel||0));
  if(r?.scoreNormalized!=null)x-=Math.min(35,r.scoreNormalized*.34);
  x=Math.max(0,Math.min(100,x));
  const label=x>=80?"HIGH CONVICTION WATCH":x>=68?"EARLY BUY WATCH":x>=55?"MOMENTUM WATCH":"NO CALL";
