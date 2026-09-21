@@ -24,26 +24,110 @@
 <section id="wallet" class="page"><div class="two"><section class="card"><small>CONNECTED WALLET</small><h1 id="wa">Not connected</h1><p id="wn" class="muted">Connect Solflare to display your public address and SOL balance.</p><button id="disconnect" class="btn">Disconnect</button></section><section class="card"><small>SOL BALANCE</small><div id="bal" class="value">—</div><p class="muted">Read-only. No seed phrase or private key is requested.</p></section></div></section>
 </main>
 <script>
-const M=new Map(),q=document.getElementById('q'),rows=document.getElementById('rows'),feed=document.getElementById('feed');
-const esc=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const money=x=>{x=+x;if(!isFinite(x))return'—';if(x>=1e9)return'$'+(x/1e9).toFixed(2)+'B';if(x>=1e6)return'$'+(x/1e6).toFixed(2)+'M';if(x>=1e3)return'$'+(x/1e3).toFixed(1)+'K';return x>=1?'$'+x.toFixed(2):x?'$'+x.toPrecision(4):'—'};
-const pct=x=>isFinite(+x)?((+x>=0?'+':'')+(+x).toFixed(1)+'%'):'—';
-const cls=t=>t.category==='RISK'?'risk':t.category==='EARLY'?'':'warn';
-function draw(){
- let z=[...M.values()].filter(t=>{const str=(t.name+' '+t.symbol+' '+t.mint).toLowerCase(),p=t.pair||{};return str.includes(q.value.toLowerCase())&&p&&t.quality}).sort((a,b)=>(b.signal?.score||0)-(a.signal?.score||0)).slice(0,100);
- rows.innerHTML=z.map(t=>{const p=t.pair||{},r=t.rug||{},s=t.signal||{},b=+p.txns?.h1?.buys||0,ss=+p.txns?.h1?.sells||0,br=b+ss?b/(b+ss):0,pts=(t.chart||[]).map(x=>+x.price).filter(isFinite),risk=r.scoreNormalized==null?'CHECK':Math.round(r.scoreNormalized),riskClass=r.rugged||risk>=45?'risk':risk>=30?'warn':'',scoreClass=s.score>=72?'':s.score>=62?'warn':'risk';
- return '<tr class="coin-row" data-dex="'+esc(p.url||('https://dexscreener.com/solana/'+(p.pairAddress||'')))+'"><td><b>'+esc(t.name)+'</b><br><small>'+esc(t.symbol)+' · '+esc(t.mint.slice(0,8))+'…</small></td><td><span class="badge '+cls(t)+'">'+esc(t.category||'—')+'</span></td><td>'+money(p.priceUsd)+'</td><td class="'+(+p.priceChange?.m5>=0?'green':'risk')+'">'+pct(p.priceChange?.m5)+'</td><td>'+pct(p.priceChange?.h1)+'</td><td>'+money(p.marketCap||p.fdv)+'</td><td>'+money(p.liquidity?.usd)+'</td><td>'+money(p.volume?.h1)+'</td><td>'+b+' / '+ss+'<br><small>'+Math.round(br*100)+'% buy</small></td><td><span class="badge '+riskClass+'">'+risk+'</span></td><td><span class="badge '+scoreClass+'">'+s.score+' · '+esc(s.label||'')+'</span></td><td><canvas class="spark" data-points="'+esc(JSON.stringify(pts))+'" width="105" height="32"></canvas></td></tr>'}).join('')||'<tr><td colspan="12" class="empty">No verified tokens match the current filter.</td></tr>';
- document.getElementById('n').textContent=[...M.values()].length;document.getElementById('r').textContent=[...M.values()].filter(t=>t.rug&&(t.rug.rugged||t.rug.scoreNormalized>=45)).length;document.getElementById('s').textContent=[...M.values()].filter(t=>t.quality&&t.signal?.score>=72&&t.pair&&+t.pair.liquidity?.usd>=10000).length;document.getElementById('e').textContent=[...M.values()].filter(t=>t.category==='EARLY').length;
- feed.innerHTML=z.slice(0,7).map(t=>'<div class="item"><b>'+esc(t.symbol)+' · '+esc(t.category)+'</b><br><small>'+t.signal.score+'/100 · '+esc((t.signal.reasons||[]).join(' · '))+'</small></div>').join('')||'<div class="empty">Waiting for verified opportunities.</div>';
- document.querySelectorAll('canvas.spark').forEach(cv=>{const pts=JSON.parse(cv.dataset.points||'[]'),g=cv.getContext('2d');g.clearRect(0,0,cv.width,cv.height);if(pts.length<2)return;const mn=Math.min(...pts),mx=Math.max(...pts),sp=mx-mn||1;g.beginPath();pts.forEach((v,i)=>{const X=2+i*(cv.width-4)/(pts.length-1),Y=cv.height-3-(v-mn)/sp*(cv.height-6);i?g.lineTo(X,Y):g.moveTo(X,Y)});g.strokeStyle='#4df2ad';g.lineWidth=2;g.stroke()});
-}
-async function load(){try{const d=await fetch('/api/tokens',{cache:'no-store'}).then(r=>r.json());d.forEach(t=>M.set(t.mint,t));draw();const h=await fetch('/api/health').then(r=>r.json());document.getElementById('l').textContent=h.learningSamples??0}catch{}}
-async function loadCalls(){try{const c=await fetch('/api/calls',{cache:'no-store'}).then(r=>r.json());document.getElementById('callsGrid').innerHTML=c.map(t=>{const p=t.tradePlan||{},ex=p.exits||[];return '<div class="call"><small>'+esc(t.callType)+'</small><div class="title">'+esc(t.name)+' · '+esc(t.symbol)+'</div><div class="score">'+t.signal.score+'/100</div><p>'+money(t.pair?.marketCap||t.pair?.fdv)+' MC · '+money(t.pair?.liquidity?.usd)+' liq · '+money(t.pair?.volume?.h1)+' 1h vol</p><p class="muted">'+esc((t.signal.reasons||[]).join(' · '))+'</p><div class="statline"><span>Entry</span><b>'+(p.eligible?money(p.entry?.low)+' – '+money(p.entry?.high):'NO ENTRY')+'</b></div><div class="statline"><span>Invalidation</span><b>'+(p.invalidation?money(p.invalidation.price)+' ('+p.invalidation.percent+'%)':'—')+'</b></div><div class="statline"><span>Profit ladder</span><b>'+ex.slice(0,4).map(x=>'+'+((x.multiple-1)*100).toFixed(0)+'%: '+x.sellPct+'%').join(' · ')+'</b></div><div class="statline"><span>Runner</span><b>'+(p.runner?.pct||0)+'%</b></div><p class="muted">MC ladder: '+ex.slice(0,4).map(x=>money(x.mc)).join(' → ')+'</p><a target="_blank" href="'+esc(t.pair?.url||('https://dexscreener.com/solana/'+encodeURIComponent(t.pair?.pairAddress||'')))+'">Open market →</a></div>'}).join('')||'<div class="card empty">No qualified opportunities right now. The scanner is intentionally allowed to make no call when the gates are not met.</div>}catch(e){document.getElementById('callsGrid').innerHTML='<div class="card empty">Qualified data is temporarily unavailable. Refreshing automatically…</div>'}}
-async function loadRisk(){const z=[...M.values()].filter(t=>t.rug&&(t.rug.rugged||t.rug.scoreNormalized>=30)).sort((a,b)=>(b.rug?.scoreNormalized||0)-(a.rug?.scoreNormalized||0)).slice(0,30);document.getElementById('riskGrid').innerHTML=z.map(t=>'<div class="call"><small>'+esc(t.category)+'</small><div class="title">'+esc(t.name)+' · '+esc(t.symbol)+'</div><div class="score" style="color:var(--red)">'+Math.round(t.rug.scoreNormalized||0)+'</div><p>'+esc((t.signal?.reasons||[]).join(' · '))+'</p><a target="_blank" href="https://rugcheck.xyz/tokens/'+encodeURIComponent(t.mint)+'">Open RugCheck →</a></div>').join('')||'<div class="card empty">No elevated-risk tokens currently enriched.</div>'}
-document.getElementById('rows').addEventListener('click',e=>{const row=e.target.closest('tr.coin-row');if(!row)return;const url=row.dataset.dex;if(url&&url!=='https://dexscreener.com/solana/')window.open(url,'_blank','noopener,noreferrer')});
-document.querySelectorAll('.nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('.nav button').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.page').forEach(x=>x.classList.remove('active'));document.getElementById(b.dataset.page).classList.add('active');if(b.dataset.page==='calls')loadCalls();if(b.dataset.page==='risk')loadRisk()});
-let ev;function connectStream(){if(ev)try{ev.close()}catch{};ev=new EventSource('/events');ev.onopen=()=>{document.getElementById('st').textContent='LIVE · streaming';load()};ev.onerror=()=>{document.getElementById('st').textContent='Reconnecting…';setTimeout(connectStream,2500)};ev.addEventListener('status',e=>{document.getElementById('st').textContent=JSON.parse(e.data).ok?'LIVE · streaming':'Reconnecting…'});['snapshot','token','update'].forEach(k=>ev.addEventListener(k,e=>{const d=JSON.parse(e.data);(k==='snapshot'?d:[d]).forEach(t=>M.set(t.mint,t));draw()}))}connectStream();load();q.oninput=draw;setInterval(load,4000);setInterval(()=>{if(document.getElementById('calls').classList.contains('active'))loadCalls()},8000);loadCalls();
-document.querySelectorAll('.chip').forEach(x=>x.onclick=()=>{document.getElementById('ask').value=x.dataset.q;ask()});
-async function ask(){const input=document.getElementById('ask'),question=input.value.trim();if(!question)return;const chat=document.getElementById('chat');chat.innerHTML+='<div class="msg user">'+esc(question)+'</div>';input.value='';try{const d=await fetch('/api/agent?q='+encodeURIComponent(question)).then(r=>r.json());chat.innerHTML+='<div class="msg"><b>Agent</b><br>'+esc(d.answer)+'<br><br><small>Tracked '+d.market.tracked+' · qualified '+d.market.candidates+' · risk '+d.market.riskFlags+' · learning samples '+d.market.learningSamples+'</small></div>'}catch{chat.innerHTML+='<div class="msg">Agent connection failed. The live scanner is still running.</div>'}chat.scrollTop=chat.scrollHeight}document.getElementById('askbtn').onclick=ask;document.getElementById('ask').onkeydown=e=>{if(e.key==='Enter')ask()};
-let wallet=null;async function connectWallet(){try{if(!window.solflare){alert('Install Solflare or open PumpScope inside Solflare.');return}await window.solflare.connect();wallet=window.solflare.publicKey?.toString();if(wallet)await refreshWallet()}catch(e){console.error(e)}}async function refreshWallet(){if(!wallet)return;document.getElementById('wa').textContent=wallet.slice(0,7)+'…'+wallet.slice(-7);document.getElementById('wn').textContent=wallet;const d=await fetch('/api/wallet?address='+encodeURIComponent(wallet)).then(r=>r.json());if(!d.error)document.getElementById('bal').textContent=d.balanceSol.toFixed(4)+' SOL'}document.getElementById('connect').onclick=connectWallet;document.getElementById('disconnect').onclick=()=>{try{window.solflare?.disconnect()}catch{}wallet=null;document.getElementById('wa').textContent='Not connected';document.getElementById('wn').textContent='Connect Solflare to display your public address and SOL balance.';document.getElementById('bal').textContent='—'};
+(function(){
+  "use strict";
+  const M=new Map();
+  const $=id=>document.getElementById(id);
+  const esc=x=>String(x==null?"":x).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  const money=x=>{x=Number(x);if(!Number.isFinite(x))return"—";if(x>=1e9)return"$"+(x/1e9).toFixed(2)+"B";if(x>=1e6)return"$"+(x/1e6).toFixed(2)+"M";if(x>=1e3)return"$"+(x/1e3).toFixed(1)+"K";return x>=1?"$"+x.toFixed(2):x?"$"+x.toPrecision(4):"—"};
+  const pct=x=>{x=Number(x);return Number.isFinite(x)?(x>=0?"+":"")+x.toFixed(1)+"%":"—"};
+  const dex=t=>t?.pair?.url||("https://dexscreener.com/solana/"+encodeURIComponent(t?.pair?.pairAddress||""));
+  function setStatus(s){if($("st"))$("st").textContent=s}
+  function draw(){
+    const needle=($("q")?.value||"").toLowerCase().trim();
+    const all=[...M.values()];
+    const z=all.filter(t=>{
+      const p=t?.pair; if(!p||t.quality===false)return false;
+      return !needle||[t.name,t.symbol,t.mint].some(v=>String(v||"").toLowerCase().includes(needle));
+    }).sort((a,b)=>(b.signal?.score||0)-(a.signal?.score||0)).slice(0,100);
+    if($("rows"))$("rows").innerHTML=z.length?z.map(t=>{
+      const p=t.pair||{},r=t.rug||{},s=t.signal||{},b=Number(p.txns?.h1?.buys||0),se=Number(p.txns?.h1?.sells||0),flow=b+se?Math.round(b/(b+se)*100):0;
+      const risk=r.rugged||Number(r.scoreNormalized)>=45?"risk":Number(r.scoreNormalized)>=30?"warn":"";
+      const sc=Number(s.score)>=72?"":Number(s.score)>=62?"warn":"risk";
+      return '<tr class="coin-row" data-dex="'+esc(dex(t))+'"><td><b>'+esc(t.name||"Metadata pending")+'</b><br><small>'+esc(t.symbol||"—")+' · '+esc(String(t.mint||"").slice(0,8))+'…</small></td><td><span class="badge '+(t.category==="RISK"?"risk":t.category==="EARLY"?"":"warn")+'">'+esc(t.category||"—")+'</span></td><td>'+money(p.priceUsd)+'</td><td class="'+(Number(p.priceChange?.m5)>=0?"green":"risk")+'">'+pct(p.priceChange?.m5)+'</td><td>'+pct(p.priceChange?.h1)+'</td><td>'+money(p.marketCap||p.fdv)+'</td><td>'+money(p.liquidity?.usd)+'</td><td>'+money(p.volume?.h1)+'</td><td>'+b+" / "+se+'<br><small>'+flow+'% buy</small></td><td><span class="badge '+risk+'">'+(r.scoreNormalized==null?"CHECK":Math.round(r.scoreNormalized))+'</span></td><td><span class="badge '+sc+'">'+(s.score??0)+' · '+esc(s.label||"")+'</span></td><td><span class="muted">live</span></td></tr>';
+    }).join(""):'<tr><td colspan="12" class="empty">Waiting for verified live market data…</td></tr>';
+    $("n").textContent=all.length;
+    $("r").textContent=all.filter(t=>t.rug&&(t.rug.rugged||Number(t.rug.scoreNormalized)>=45)).length;
+    $("s").textContent=all.filter(t=>t.quality&&t.signal?.score>=72&&t.pair&&Number(t.pair.liquidity?.usd)>=10000).length;
+    $("e").textContent=all.filter(t=>t.category==="EARLY").length;
+    $("feed").innerHTML=z.slice(0,7).map(t=>'<div class="item"><b>'+esc(t.symbol||"—")+' · '+esc(t.category||"—")+'</b><br><small>'+Number(t.signal?.score||0)+'/100 · '+esc((t.signal?.reasons||[]).join(" · "))+'</small></div>').join("")||'<div class="empty">Waiting for verified opportunities.</div>';
+  }
+  async function json(url){
+    const r=await fetch(url,{cache:"no-store"});
+    if(!r.ok)throw new Error(url+" HTTP "+r.status);
+    return r.json();
+  }
+  async function load(){
+    try{
+      const d=await json("/api/tokens");
+      if(Array.isArray(d))d.forEach(t=>t&&t.mint&&M.set(t.mint,t));
+      draw();
+      const h=await json("/api/health");
+      $("l").textContent=h.learningSamples??0;
+      setStatus("LIVE · data "+M.size);
+    }catch(e){
+      setStatus("DATA ERROR");
+      console.error("PumpScope load failed",e);
+    }
+  }
+  async function loadCalls(){
+    const box=$("callsGrid");
+    try{
+      const c=await json("/api/calls");
+      box.innerHTML=Array.isArray(c)&&c.length?c.map(t=>{
+        const p=t.tradePlan||{},ex=p.exits||[];
+        return '<div class="call"><small>'+esc(t.callType||"QUALIFIED")+'</small><div class="title">'+esc(t.name||"—")+' · '+esc(t.symbol||"—")+'</div><div class="score">'+Number(t.signal?.score||0)+'/100</div><p>'+money(t.pair?.marketCap||t.pair?.fdv)+' MC · '+money(t.pair?.liquidity?.usd)+' liq · '+money(t.pair?.volume?.h1)+' 1h vol</p><p class="muted">'+esc((t.signal?.reasons||[]).join(" · "))+'</p><div class="statline"><span>Entry</span><b>'+(p.eligible?money(p.entry?.low)+" – "+money(p.entry?.high):"NO ENTRY")+'</b></div><div class="statline"><span>Invalidation</span><b>'+(p.invalidation?money(p.invalidation.price)+" ("+p.invalidation.percent+"%)":"—")+'</b></div><div class="statline"><span>Profit ladder</span><b>'+ex.slice(0,4).map(x=>"+"+((Number(x.multiple)-1)*100).toFixed(0)+"%: "+x.sellPct+"%").join(" · ")+'</b></div><div class="statline"><span>Runner</span><b>'+(p.runner?.pct||0)+'%</b></div><p class="muted">MC ladder: '+ex.slice(0,4).map(x=>money(x.mc)).join(" → ")+'</p><a target="_blank" rel="noopener" href="'+esc(dex(t))+'">Open market →</a></div>';
+      }).join(""):'<div class="card empty">No qualified opportunities right now. The scanner is intentionally allowed to make no call when gates are not met.</div>';
+    }catch(e){console.error("calls failed",e);box.innerHTML='<div class="card empty">Qualified data is temporarily unavailable. Refreshing automatically…</div>'}
+  }
+  function loadRisk(){
+    const z=[...M.values()].filter(t=>t.rug&&(t.rug.rugged||Number(t.rug.scoreNormalized)>=30)).sort((a,b)=>(b.rug?.scoreNormalized||0)-(a.rug?.scoreNormalized||0)).slice(0,30);
+    $("riskGrid").innerHTML=z.map(t=>'<div class="call"><small>'+esc(t.category||"RISK")+'</small><div class="title">'+esc(t.name||"—")+' · '+esc(t.symbol||"—")+'</div><div class="score" style="color:var(--red)">'+Math.round(t.rug.scoreNormalized||0)+'</div><p>'+esc((t.signal?.reasons||[]).join(" · "))+'</p><a target="_blank" rel="noopener" href="https://rugcheck.xyz/tokens/'+encodeURIComponent(t.mint)+'">Open RugCheck →</a></div>').join("")||'<div class="card empty">No elevated-risk tokens currently enriched.</div>';
+  }
+  document.addEventListener("click",e=>{
+    const nav=e.target.closest(".nav button");
+    if(nav){
+      document.querySelectorAll(".nav button").forEach(x=>x.classList.remove("active"));
+      nav.classList.add("active");
+      document.querySelectorAll(".page").forEach(x=>x.classList.remove("active"));
+      const page=$(nav.dataset.page); if(page)page.classList.add("active");
+      if(nav.dataset.page==="calls")loadCalls();
+      if(nav.dataset.page==="risk")loadRisk();
+      return;
+    }
+    const row=e.target.closest("tr.coin-row");
+    if(row&&row.dataset.dex)window.open(row.dataset.dex,"_blank","noopener,noreferrer");
+    const chip=e.target.closest(".chip");
+    if(chip){$("ask").value=chip.dataset.q||"";ask()}
+  });
+  async function ask(){
+    const input=$("ask"),question=input.value.trim();if(!question)return;
+    const chat=$("chat");chat.innerHTML+='<div class="msg user">'+esc(question)+'</div>';input.value="";
+    try{const d=await json("/api/agent?q="+encodeURIComponent(question));chat.innerHTML+='<div class="msg"><b>Agent</b><br>'+esc(d.answer||"No answer returned.")+'<br><br><small>Tracked '+(d.market?.tracked??0)+' · qualified '+(d.market?.candidates??0)+' · risk '+(d.market?.riskFlags??0)+' · learning samples '+(d.market?.learningSamples??0)+'</small></div>'}
+    catch(e){console.error(e);chat.innerHTML+='<div class="msg">Agent connection failed. The live scanner is still running.</div>'}
+    chat.scrollTop=chat.scrollHeight;
+  }
+  $("askbtn").onclick=ask;
+  $("ask").onkeydown=e=>{if(e.key==="Enter")ask()};
+  let ev=null,retry=null;
+  function connectStream(){
+    if(ev)try{ev.close()}catch{}
+    ev=new EventSource("/events");
+    ev.onopen=()=>{setStatus("LIVE · streaming");load()};
+    ev.onerror=()=>{setStatus("Reconnecting…");clearTimeout(retry);retry=setTimeout(connectStream,3000)};
+    ["snapshot","token","update"].forEach(k=>ev.addEventListener(k,e=>{try{const d=JSON.parse(e.data);(k==="snapshot"?d:[d]).forEach(t=>t&&t.mint&&M.set(t.mint,t));draw()}catch(err){console.error("stream event",err)}}));
+  }
+  let wallet=null;
+  async function connectWallet(){
+    try{if(!window.solflare){alert("Install Solflare or open PumpScope inside Solflare.");return}await window.solflare.connect();wallet=window.solflare.publicKey?.toString();if(wallet){$("wa").textContent=wallet.slice(0,7)+"…"+wallet.slice(-7);$("wn").textContent=wallet;const d=await json("/api/wallet?address="+encodeURIComponent(wallet));if(!d.error)$("bal").textContent=Number(d.balanceSol).toFixed(4)+" SOL"}}catch(e){console.error(e)}
+  }
+  $("connect").onclick=connectWallet;
+  $("disconnect").onclick=()=>{try{window.solflare?.disconnect()}catch{}wallet=null;$("wa").textContent="Not connected";$("wn").textContent="Connect Solflare to display your public address and SOL balance.";$("bal").textContent="—"};
+  $("q").oninput=draw;
+  connectStream();
+  load();
+  loadCalls();
+  setInterval(load,4000);
+  setInterval(()=>{if($("calls").classList.contains("active"))loadCalls()},8000);
+})();
 </script></body></html>
