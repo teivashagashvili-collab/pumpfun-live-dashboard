@@ -118,6 +118,19 @@ async function add(e){
  tokens.set(t.mint,t);while(tokens.size>500)tokens.delete(tokens.keys().next().value);
  const z=await enrich(t);tokens.set(t.mint,z);broadcast("update",z);
 }
+function findToken(q){
+ const s=String(q||"").toLowerCase().trim();
+ return [...tokens.values()].find(t=>t.mint.toLowerCase()===s||t.symbol?.toLowerCase()===s||t.name?.toLowerCase()===s)||[...tokens.values()].find(t=>s&&(t.symbol?.toLowerCase().includes(s)||t.name?.toLowerCase().includes(s)));
+}
+function tradePlan(t){
+ const p=t?.pair||{},price=+p.priceUsd||0,mc=+p.marketCap||+p.fdv||0,liq=+p.liquidity?.usd||0,score=+t?.signal?.score||0,risk=+t?.rug?.scoreNormalized||0;
+ if(!price||!mc)return{status:"NO_DATA"};
+ const eligible=score>=72&&liq>=10000&&risk<45&&candidateScore(t)>=72;
+ const buyRatio=+(t?.signal?.metrics?.buyRatio||0.5),h1=+p.priceChange?.h1||0,m5=+p.priceChange?.m5||0;
+ const entryLow=price*(m5>8?0.97:0.985),entryHigh=price*(m5>8?1.01:1.02);
+ const exits=[{multiple:1.5,sellPct:20,mc:mc*1.5},{multiple:2,sellPct:20,mc:mc*2},{multiple:3,sellPct:20,mc:mc*3},{multiple:5,sellPct:20,mc:mc*5},{multiple:null,sellPct:20,mc:null}];
+ return{status:eligible?"RESEARCH_ENTRY":"NO_ENTRY",eligible,score,risk,price,marketCap:mc,liquidity:liq,entry:{low:entryLow,high:entryHigh,reason:m5>8?"avoid chasing; prefer pullback":"narrow band near current price"},invalidation:{price:price*0.88,percent:-12},exits,runner:{pct:20,rule:"keep only while structure stays constructive; reconsider if 1h momentum rolls over, sellers dominate, or liquidity deteriorates"},signals:{m5,h1,buyRatio},note:"Rules-based research scenario, not a guarantee or personalized financial recommendation."};
+}
 function getCalls(){
  return [...tokens.values()].filter(t=>candidateScore(t)>=72&&quality(t)).map(t=>({...t,callType:t.signal.score>=82?"A-TIER WATCH":t.signal.score>=74?"QUALIFIED WATCH":"MOMENTUM WATCH"})).sort((a,b)=>candidateScore(b)-candidateScore(a)).slice(0,30);
 }
@@ -134,9 +147,9 @@ async function walletData(address){
 async function llmAgent(question){
  const key=process.env.OPENAI_API_KEY;
  if(!key)return null;
- const candidates=getCalls().slice(0,12).map(t=>({mint:t.mint,name:t.name,symbol:t.symbol,category:t.category,score:t.signal.score,reasons:t.signal.reasons,metrics:t.signal.metrics,price:t.pair?.priceUsd,mc:t.pair?.marketCap||t.pair?.fdv,liquidity:t.pair?.liquidity?.usd,volume1h:t.pair?.volume?.h1,buys:t.pair?.txns?.h1?.buys,sells:t.pair?.txns?.h1?.sells,risk:t.rug?.scoreNormalized}));
+ const candidates=getCalls().slice(0,12).map(t=>({mint:t.mint,name:t.name,symbol:t.symbol,category:t.category,score:t.signal.score,reasons:t.signal.reasons,metrics:t.signal.metrics,price:t.pair?.priceUsd,mc:t.pair?.marketCap||t.pair?.fdv,liquidity:t.pair?.liquidity?.usd,volume1h:t.pair?.volume?.h1,buys:t.pair?.txns?.h1?.buys,sells:t.pair?.txns?.h1?.sells,risk:t.rug?.scoreNormalized,plan:tradePlan(t)}));
  const mem=await recentMemory(),stats=await persistentStats();
- const system=`You are PumpScope's live crypto market research agent. Speak naturally, deeply and clearly like a strong research analyst. Never invent live facts. The supplied market data is the source of truth. Explain evidence, uncertainty, risk, liquidity, market structure and alternative interpretations. Do not promise profits or claim a token will 100x. Distinguish observation from inference. If evidence is insufficient, say so. The scanner's qualified candidates are research candidates, not guaranteed buys. Persistent observations: ${stats.observations}; tracked historical tokens: ${stats.tokens}; positive 5m outcome observations: ${stats.outcomes5m}. Recent agent memory: ${JSON.stringify(mem)}. Current qualified candidates: ${JSON.stringify(candidates)}`;
+ const system=`You are PumpScope's live crypto market research agent. Speak naturally, deeply and clearly like a strong research analyst. Never invent live facts. The supplied market data is the source of truth. Explain evidence, uncertainty, risk, liquidity, market structure and alternative interpretations. Do not promise profits or claim a token will 100x. Distinguish observation from inference. If evidence is insufficient, say so. The scanner's qualified candidates are research candidates, not guaranteed buys. When asked for an entry or exit call, give a clearly labeled rules-based research plan from the supplied live data. Give NO ENTRY when eligibility fails. For exits, provide staged percentages and market-cap multiples as a mechanical scenario, never as a prediction or certainty. Persistent observations: ${stats.observations}; tracked historical tokens: ${stats.tokens}; positive 5m outcome observations: ${stats.outcomes5m}. Recent agent memory: ${JSON.stringify(mem)}. Current qualified candidates: ${JSON.stringify(candidates)}`;
  try{
   const r=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{"content-type":"application/json","authorization":"Bearer "+key},body:JSON.stringify({model:process.env.OPENAI_MODEL||"gpt-5.6-luna",instructions:system,input:question,reasoning:{effort:"medium"},max_output_tokens:900})});
   if(!r.ok)throw Error("LLM "+r.status);
@@ -147,7 +160,8 @@ async function llmAgent(question){
  }catch(e){console.error("LLM agent failed:",e.message);return null}
 }
 async function agentAnswer(question){
- const ai=await llmAgent(question); if(ai)return{answer:ai,mode:"llm",market:{tracked:tokens.size,candidates:getCalls().length,learningSamples:learning.samples}};
+ const requested=findToken(question),plan=requested?tradePlan(requested):null;
+ const ai=await llmAgent(question); if(ai)return{answer:ai,mode:"llm",plan,market:{tracked:tokens.size,candidates:getCalls().length,learningSamples:learning.samples}};
  const c=getCalls(),q=String(question||"").trim().toLowerCase(),top=c[0],high=c.slice(0,10),all=getRadar(),risks=all.filter(x=>x.rug?.rugged||x.rug?.scoreNormalized>=45),early=all.filter(x=>x.category==="EARLY"&&candidateScore(x)>=60).slice(0,8);
  let answer;
  if(!q)answer="I’m the market research layer. Ask me about a token, risk, charts, the current regime, qualified setups, or what the historical observations are learning.";
@@ -168,7 +182,8 @@ http.createServer(async(req,res)=>{
  if(u.pathname==="/api/tokens")return send(res,200,[...tokens.values()]);
  if(u.pathname==="/api/radar")return send(res,200,getRadar());
  if(u.pathname==="/api/health")return send(res,200,{ok:true,tracked:tokens.size,qualified:getCalls().length,learningSamples:learning.samples,now:Date.now()});
- if(u.pathname==="/api/calls")return send(res,200,getCalls());
+ if(u.pathname==="/api/calls")return send(res,200,getCalls().map(t=>({...t,tradePlan:tradePlan(t)})));
+ if(u.pathname==="/api/plan"){const t=findToken(u.searchParams.get("q")||u.searchParams.get("mint")||"");return send(res,200,t?{token:{mint:t.mint,name:t.name,symbol:t.symbol},plan:tradePlan(t)}:{error:"Token not found"});}
  if(u.pathname==="/api/wallet"){try{return send(res,200,await walletData(u.searchParams.get("address")||""))}catch(e){return send(res,400,{error:e.message})}}
  if(u.pathname==="/api/agent"){return send(res,200,await agentAnswer(u.searchParams.get("q")||""))}
  if(u.pathname==="/api/learning"){return send(res,200,{persistent:await persistentStats(),inProcess:learning})}
