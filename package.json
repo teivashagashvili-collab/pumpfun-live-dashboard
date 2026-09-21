@@ -1,1 +1,1 @@
-{"name":"pumpfun-live-dashboard","version":"1.0.0","private":true,"description":"Live Pump.fun token dashboard","scripts":{"start":"node server.js"},"engines":{"node":">=22"},"dependencies":{"ws":"^8.18.3"}}
+{"name":"pumpfun-live-dashboard","version":"1.0.0","private":true,"description":"Live Pump.fun token dashboard","scripts":{"start":"node server.js"},"engines":{"node":">=22"},"dependencies":{"ws":"^8.18.3","pg":"^8.16.3"}}
