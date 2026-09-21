@@ -1,5 +1,5 @@
 const http=require("http"),fs=require("fs"),path=require("path"),WebSocket=require("ws");const {URL}=require("url");const {Pool}=require("pg");
-const PORT=Number(process.env.PORT||8787),PUBLIC=path.join(__dirname,"public"),clients=new Set(),tokens=new Map(),history=new Map(),learning={samples:0,positive:0,negative:0};
+const PORT=Number(process.env.PORT||8787),PUBLIC=path.join(__dirname,"public"),clients=new Set(),tokens=new Map(),history=new Map(),inflight=new Set(),learning={samples:0,positive:0,negative:0};
 const pool=process.env.DATABASE_URL?new Pool({connectionString:process.env.DATABASE_URL,ssl:{rejectUnauthorized:false},max:5}):null;
 let dbReady=false;
 async function initDB(){
@@ -113,10 +113,14 @@ async function enrich(t){
 }
 async function add(e){
  if(!e?.mint)return;
- const t={mint:String(e.mint),name:String(e.name||"Unknown"),symbol:String(e.symbol||"TOKEN"),creator:String(e.traderPublicKey||e.creator||""),uri:String(e.uri||""),createdAt:Number(e.created_timestamp||Date.now())};
- if(tokens.has(t.mint))return;
- tokens.set(t.mint,t);while(tokens.size>500)tokens.delete(tokens.keys().next().value);
- const z=await enrich(t);tokens.set(t.mint,z);broadcast("update",z);
+ const mint=String(e.mint);if(inflight.has(mint))return;
+ const t={mint,name:String(e.name||"Unknown"),symbol:String(e.symbol||"TOKEN"),creator:String(e.traderPublicKey||e.creator||""),uri:String(e.uri||""),createdAt:Number(e.created_timestamp||Date.now())};
+ inflight.add(mint);
+ try{
+  const existing=tokens.get(mint); if(existing?.pair && Date.now()-(existing.updatedAt||0)<12000)return;
+  tokens.set(mint,{...(existing||{}),...t});while(tokens.size>500)tokens.delete(tokens.keys().next().value);
+  const z=await enrich({...tokens.get(mint),...t});tokens.set(mint,z);broadcast("update",z);
+ }catch(err){console.error("token ingest failed",mint,err.message)}finally{inflight.delete(mint)}
 }
 function usd(x){x=+x;if(!Number.isFinite(x))return"—";if(x>=1e9)return"$"+(x/1e9).toFixed(2)+"B";if(x>=1e6)return"$"+(x/1e6).toFixed(2)+"M";if(x>=1e3)return"$"+(x/1e3).toFixed(1)+"K";return"$"+x.toPrecision(4)}
 function findToken(q){
@@ -153,7 +157,7 @@ async function llmAgent(question){
  const system=`You are PumpScope's live crypto market research agent. Speak naturally, deeply and clearly like a strong research analyst. Never invent live facts. The supplied market data is the source of truth. Explain evidence, uncertainty, risk, liquidity, market structure and alternative interpretations. Do not promise profits or claim a token will 100x. Distinguish observation from inference. If evidence is insufficient, say so. The scanner's qualified candidates are research candidates, not guaranteed buys. When asked for an entry or exit call, give a clearly labeled rules-based research plan from the supplied live data. Give NO ENTRY when eligibility fails. For exits, provide staged percentages and market-cap multiples as a mechanical scenario, never as a prediction or certainty. Persistent observations: ${stats.observations}; tracked historical tokens: ${stats.tokens}; positive 5m outcome observations: ${stats.outcomes5m}. Recent agent memory: ${JSON.stringify(mem)}. Current qualified candidates: ${JSON.stringify(candidates)}`;
  try{
   const r=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{"content-type":"application/json","authorization":"Bearer "+key},body:JSON.stringify({model:process.env.OPENAI_MODEL||"gpt-5.6-luna",instructions:system,input:question,reasoning:{effort:"medium"},max_output_tokens:900})});
-  if(!r.ok)throw Error("LLM "+r.status);
+  if(!r.ok){const body=await r.text();throw Error("LLM "+r.status+" "+body.slice(0,240));}
   const j=await r.json();const text=j.output_text||j.output?.flatMap(x=>x.content||[]).map(x=>x.text||"").join("")||"";
   if(!text)throw Error("empty LLM response");
   await remember("conversation",JSON.stringify({q:question,a:text}));
@@ -174,10 +178,21 @@ async function agentAnswer(question){
  return{answer,mode:"rules",market:{tracked:tokens.size,candidates:c.length,riskFlags:risks.length,early:early.length,learningSamples:learning.samples},method:"Live market data + risk gates + persistent observations + calibrated feature research."};
 }
 function connect(){
- try{const w=new WebSocket("wss://pumpportal.fun/api/data",{handshakeTimeout:15000});w.on("open",()=>{console.log("PumpPortal connected");w.send(JSON.stringify({method:"subscribeNewToken"}));w.send(JSON.stringify({method:"subscribeMigration"}));broadcast("status",{ok:true})});w.on("message",d=>{try{add(JSON.parse(String(d)))}catch{}});w.on("close",()=>{broadcast("status",{ok:false});setTimeout(connect,3000)});w.on("error",()=>broadcast("status",{ok:false}))}catch{setTimeout(connect,3000)}
+ try{const w=new WebSocket("wss://pumpportal.fun/api/data",{handshakeTimeout:15000});w.on("open",()=>{console.log("PumpPortal connected");w.send(JSON.stringify({method:"subscribeNewToken"}));w.send(JSON.stringify({method:"subscribeMigration"}));broadcast("status",{ok:true})});w.on("message",d=>{try{const e=JSON.parse(String(d));if(e?.mint)add(e)}catch(err){console.error("PumpPortal message parse failed",err.message)}});w.on("close",()=>{console.log("PumpPortal disconnected; reconnecting");broadcast("status",{ok:false});setTimeout(connect,3000)});w.on("error",err=>{console.error("PumpPortal websocket error",err.message);broadcast("status",{ok:false})})}catch(err){console.error("PumpPortal connect failed",err.message);setTimeout(connect,3000)}
 }
-setInterval(async()=>{for(const t of [...tokens.values()].slice(0,35)){const z=await enrich(t);tokens.set(t.mint,z);broadcast("update",z)}},15000);
+async function bootstrapDex(){
+ try{
+  const a=await getJSON("https://api.dexscreener.com/token-profiles/latest/v1");
+  const list=Array.isArray(a)?a:[];
+  const sol=list.filter(x=>x?.chainId==="solana"&&x?.tokenAddress).slice(0,40);
+  console.log("DexScreener bootstrap",sol.length);
+  for(const x of sol) await add({mint:x.tokenAddress,name:x.description||"Unknown",symbol:"TOKEN"});
+ }catch(e){console.error("DexScreener bootstrap failed",e.message)}
+}
+setInterval(bootstrapDex,30000);
+setInterval(async()=>{for(const t of [...tokens.values()].slice(0,35)){try{const z=await enrich(t);tokens.set(t.mint,z);broadcast("update",z)}catch(e){console.error("refresh failed",t.mint,e.message)}}},15000);
 initDB().catch(()=>{});
+bootstrapDex();
 http.createServer(async(req,res)=>{
  const u=new URL(req.url,`http://${req.headers.host||"localhost"}`);
  if(u.pathname==="/api/tokens")return send(res,200,[...tokens.values()]);
