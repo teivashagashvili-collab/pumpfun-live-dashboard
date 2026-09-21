@@ -176,3 +176,4 @@ http.createServer(async(req,res)=>{
  const f=path.join(PUBLIC,u.pathname==="/"?"index.html":u.pathname);if(!f.startsWith(PUBLIC))return send(res,403,{error:"forbidden"});
  fs.readFile(f,(e,d)=>{if(e)return send(res,404,{error:"not found"});const ct=path.extname(f)===".html"?"text/html; charset=utf-8":path.extname(f)===".js"?"text/javascript; charset=utf-8":"text/plain; charset=utf-8";res.writeHead(200,{"Content-Type":ct,"Cache-Control":"no-cache"});res.end(d)})
 }).listen(PORT,"0.0.0.0",()=>{console.log("PumpScope on "+PORT);connect()});
+// Railway deployment verification: deploy current main commit.
