@@ -1,7 +1,8 @@
 const http=require("http"),fs=require("fs"),path=require("path"),WebSocket=require("ws");const {URL}=require("url");
 const PORT=Number(process.env.PORT||8787),PUBLIC=path.join(__dirname,"public"),clients=new Set(),tokens=new Map();
 const send=(r,c,d,extra={})=>{r.writeHead(c,{"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store",...extra});r.end(JSON.stringify(d))};
-const broadcast=(e,d)=>{const x=`event: ${e}\ndata: ${JSON.stringify(d)}\n\n`;for(const r of clients){try{r.write(x)}catch{}}};\nconst heartbeat=setInterval(()=>{for(const r of clients){try{r.write(`: heartbeat ${Date.now()}\\n\\n`)}catch{}}},10000);
+const broadcast=(e,d)=>{const x=`event: ${e}\ndata: ${JSON.stringify(d)}\n\n`;for(const r of clients){try{r.write(x)}catch{}}};
+const heartbeat=setInterval(()=>{for(const r of clients){try{r.write(`: heartbeat ${Date.now()}\n\n`)}catch{}}},10000);
 async function getJSON(u){const r=await fetch(u,{headers:{accept:"application/json"}});if(!r.ok)throw Error(r.status);return r.json()}
 function scoreSignal(p,r){
  const pc=+p?.priceChange?.m5||0,h=+p?.priceChange?.h1||0,b=+p?.txns?.h1?.buys||0,s=+p?.txns?.h1?.sells||0,l=+p?.liquidity?.usd||0,f=b+s?b/(b+s):.5;
@@ -63,4 +64,4 @@ http.createServer(async(req,res)=>{
  if(u.pathname==="/events"){res.writeHead(200,{"Content-Type":"text/event-stream; charset=utf-8","Cache-Control":"no-cache, no-transform","Connection":"keep-alive","Access-Control-Allow-Origin":"*","X-Accel-Buffering":"no"});res.write(`event: snapshot\ndata: ${JSON.stringify([...tokens.values()])}\n\n`);clients.add(res);req.on("close",()=>clients.delete(res));return}
  const f=path.join(PUBLIC,u.pathname==="/"?"index.html":u.pathname);if(!f.startsWith(PUBLIC))return send(res,403,{error:"forbidden"});
  fs.readFile(f,(e,d)=>{if(e)return send(res,404,{error:"not found"});const ct=path.extname(f)===".html"?"text/html; charset=utf-8":path.extname(f)===".js"?"text/javascript; charset=utf-8":"text/plain; charset=utf-8";res.writeHead(200,{"Content-Type":ct,"Cache-Control":"no-cache"});res.end(d)})
-}).listen(PORT,()=>{console.log("PumpScope on "+PORT);connect()});
+}).listen(PORT,"0.0.0.0",()=>{console.log("PumpScope on "+PORT);connect()});
