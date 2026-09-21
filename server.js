@@ -138,7 +138,7 @@ async function llmAgent(question){
  const mem=await recentMemory(),stats=await persistentStats();
  const system=`You are PumpScope's live crypto market research agent. Speak naturally, deeply and clearly like a strong research analyst. Never invent live facts. The supplied market data is the source of truth. Explain evidence, uncertainty, risk, liquidity, market structure and alternative interpretations. Do not promise profits or claim a token will 100x. Distinguish observation from inference. If evidence is insufficient, say so. The scanner's qualified candidates are research candidates, not guaranteed buys. Persistent observations: ${stats.observations}; tracked historical tokens: ${stats.tokens}; positive 5m outcome observations: ${stats.outcomes5m}. Recent agent memory: ${JSON.stringify(mem)}. Current qualified candidates: ${JSON.stringify(candidates)}`;
  try{
-  const r=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{"content-type":"application/json","authorization:"Bearer "+key},body:JSON.stringify({model:process.env.OPENAI_MODEL||"gpt-5.6-luna",instructions:system,input:question,reasoning:{effort:"medium"},max_output_tokens:900})});
+  const r=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{"content-type":"application/json","authorization":"Bearer "+key},body:JSON.stringify({model:process.env.OPENAI_MODEL||"gpt-5.6-luna",instructions:system,input:question,reasoning:{effort:"medium"},max_output_tokens:900})});
   if(!r.ok)throw Error("LLM "+r.status);
   const j=await r.json();const text=j.output_text||j.output?.flatMap(x=>x.content||[]).map(x=>x.text||"").join("")||"";
   if(!text)throw Error("empty LLM response");
