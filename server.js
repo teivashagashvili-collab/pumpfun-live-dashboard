@@ -5,18 +5,27 @@ const broadcast=(e,d)=>{const x=`event: ${e}\ndata: ${JSON.stringify(d)}\n\n`;fo
 const heartbeat=setInterval(()=>{for(const r of clients){try{r.write(`: heartbeat ${Date.now()}\n\n`)}catch{}}},10000);
 async function getJSON(u){const r=await fetch(u,{headers:{accept:"application/json"}});if(!r.ok)throw Error(r.status);return r.json()}
 function scoreSignal(p,r,trend={}){
- const pc=+p?.priceChange?.m5||0,h=+p?.priceChange?.h1||0,b=+p?.txns?.h1?.buys||0,s=+p?.txns?.h1?.sells||0,l=+p?.liquidity?.usd||0,f=b+s?b/(b+s):.5;
- let x=40+pc*1.35+h*.28+(f-.5)*42+Math.min(14,Math.log10(Math.max(1,l))*2.4)+Math.min(12,Math.log10(Math.max(1,+p?.volume?.h1||0))*2)+Math.max(-8,Math.min(8,+trend.accel||0));
- if(r?.scoreNormalized!=null)x-=Math.min(35,r.scoreNormalized*.34);
+ const pc=+p?.priceChange?.m5||0,h=+p?.priceChange?.h1||0,b=+p?.txns?.h1?.buys||0,s=+p?.txns?.h1?.sells||0,l=+p?.liquidity?.usd||0,v=+p?.volume?.h1||0,f=b+s?b/(b+s):.5,mc=+p?.marketCap||+p?.fdv||0;
+ const ageH=p?.pairCreatedAt?Math.max(0,(Date.now()-p.pairCreatedAt)/3600000):9999,vl=l>0?v/l:0,trades=b+s;
+ let x=38+pc*1.05+h*.20+(f-.5)*34+Math.min(15,Math.log10(Math.max(1,l))*2.6)+Math.min(15,Math.log10(Math.max(1,v))*2.2)+Math.max(-8,Math.min(8,+trend.accel||0));
+ if(ageH<=1)x+=4;else if(ageH>72)x-=5;
+ if(vl<1)x-=10;else if(vl>8)x+=5;
+ if(trades<25)x-=8;
+ if(mc>25000000)x-=18;if(mc>100000000)x-=28;
+ if(r?.rugged)x-=60;if(r?.scoreNormalized!=null)x-=Math.min(45,r.scoreNormalized*.55);
  x=Math.max(0,Math.min(100,x));
- const label=x>=80?"HIGH CONVICTION WATCH":x>=68?"EARLY BUY WATCH":x>=55?"MOMENTUM WATCH":"NO CALL";
- return{score:Math.round(x),label,side:x>=68?"BUY WATCH":"WAIT",reasons:[
-   pc>4?"5m momentum is positive":pc<-5?"5m momentum is weak":null,
-   h>8?"1h trend is strong":h<-10?"1h trend is weak":null,
-   f>.58?"buyers currently dominate":f<.42?"sellers currently dominate":null,
-   l>50000?"liquidity is meaningful":l<5000?"liquidity is thin":null,
-   r?.rugged?"RugCheck flags the token":r?.scoreNormalized>=45?"risk score is elevated":null
- ].filter(Boolean).slice(0,4)}}
+ const label=x>=82?"A-TIER WATCH":x>=72?"QUALIFIED WATCH":x>=62?"MOMENTUM WATCH":"NO CALL";
+ return{score:Math.round(x),label,side:x>=72?"WATCH":"WAIT",reasons:[
+  pc>4?"5m momentum positive":pc<-5?"5m momentum weak":null,
+  h>10?"1h trend strong":h<-10?"1h trend weak":null,
+  f>.60?"buyers dominate":f<.40?"sellers dominate":null,
+  l>=25000?"liquidity has depth":l<10000?"thin liquidity":null,
+  vl>=5?"strong volume/liquidity ratio":vl<1?"weak volume relative to liquidity":null,
+  ageH<=24?"fresh market":ageH>72?"older pair":null,
+  mc>25000000?"large-cap penalty":mc>0&&mc<5000000?"small-cap room":null,
+  r?.rugged?"rug flag":r?.scoreNormalized>=45?"elevated safety risk":null
+ ].filter(Boolean).slice(0,5),metrics:{ageHours:ageH,volumeLiquidity:vl,buyRatio:f,marketCap:mc,trades}};
+}
 function updateLearning(t,p){
  const price=Number(p?.priceUsd);if(!Number.isFinite(price)||price<=0)return;
  const arr=history.get(t.mint)||[];const now=Date.now();arr.push({ts:now,price});while(arr.length>240)arr.shift();history.set(t.mint,arr);
