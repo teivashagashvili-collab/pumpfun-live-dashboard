@@ -309,17 +309,21 @@ function quality(t) {
 
 async function enrich(t) {
   try {
-    const a = await getJSON(`https://api.dexscreener.com/token-pairs/v1/solana/${encodeURIComponent(t.mint)}`);
+    // The pair, metadata and rugcheck lookups are independent, so they run concurrently instead
+    // of one after another — sequential awaits here (each with its own 10s timeout) used to let a
+    // single slow/rate-limited call stall this token for up to ~30s, and under real load across
+    // hundreds of tracked tokens that turned into a backlog severe enough that most tokens never
+    // finished enriching (no pair -> quality:false -> invisible everywhere in the UI).
+    const [a, meta, r] = await Promise.all([
+      getJSON(`https://api.dexscreener.com/token-pairs/v1/solana/${encodeURIComponent(t.mint)}`),
+      t.uri ? getJSON(t.uri).then(m => (m && typeof m === "object" ? m : {})).catch(() => ({})) : Promise.resolve({}),
+      getJSON(`https://api.rugcheck.xyz/v1/tokens/${encodeURIComponent(t.mint)}/report`).then(z => {
+        const raw = +z?.score;
+        return { scoreRaw: Number.isFinite(raw) ? raw : null, scoreNormalized: Number.isFinite(raw) ? Math.max(0, Math.min(100, raw > 100 ? raw / 200 : raw)) : null, rugged: !!z?.rugged };
+      }).catch(() => null)
+    ]);
     const pairs = Array.isArray(a) ? a : (Array.isArray(a?.pairs) ? a.pairs : []);
     const p = pairs.filter(x => x?.chainId === "solana").sort((a, b) => (+b?.liquidity?.usd || 0) - (+a?.liquidity?.usd || 0))[0] || null;
-    let meta = {};
-    if (t.uri) { try { const m = await getJSON(t.uri); if (m && typeof m === "object") meta = m; } catch {} }
-    let r = null;
-    try {
-      const z = await getJSON(`https://api.rugcheck.xyz/v1/tokens/${encodeURIComponent(t.mint)}/report`);
-      const raw = +z?.score;
-      r = { scoreRaw: Number.isFinite(raw) ? raw : null, scoreNormalized: Number.isFinite(raw) ? Math.max(0, Math.min(100, raw > 100 ? raw / 200 : raw)) : null, rugged: !!z?.rugged };
-    } catch {}
     const name = (p?.baseToken?.name && p.baseToken.name !== "Unknown" ? p.baseToken.name : null) || (meta.name && String(meta.name).trim()) || (t.name && t.name !== "Unknown" ? t.name : null);
     const symbol = (p?.baseToken?.symbol && p.baseToken.symbol !== "TOKEN" ? p.baseToken.symbol : null) || (meta.symbol && String(meta.symbol).trim()) || (t.symbol && t.symbol !== "TOKEN" ? t.symbol : null);
     const merged = { ...t, name: name || "Metadata pending", symbol: symbol || "—", metadataImage: meta.image || meta.image_url || p?.info?.imageUrl || "", metadataDescription: meta.description || "", pair: p, rug: r };
@@ -581,13 +585,24 @@ function connect() {
   try { const w = new WebSocket("wss://pumpportal.fun/api/data", { handshakeTimeout: 15000 }); w.on("open", () => { console.log("PumpPortal connected"); w.send(JSON.stringify({ method: "subscribeNewToken" })); w.send(JSON.stringify({ method: "subscribeMigration" })); broadcast("status", { ok: true }); }); w.on("message", d => { try { const e = JSON.parse(String(d)); if (e?.mint) add(e); } catch (err) { console.error("PumpPortal message parse failed", err.message); } }); w.on("close", () => { console.log("PumpPortal disconnected; reconnecting"); broadcast("status", { ok: false }); setTimeout(connect, 3000); }); w.on("error", err => { console.error("PumpPortal websocket error", err.message); broadcast("status", { ok: false }); }); } catch (err) { console.error("PumpPortal connect failed", err.message); setTimeout(connect, 3000); }
 }
 
+// Bounded-concurrency map: runs `fn` over `items` with at most `limit` in flight at once. Used
+// anywhere we used to enrich/add tokens one at a time in a sequential for-loop, which meant a
+// single slow external call stalled every token behind it in the batch.
+async function mapLimit(items, limit, fn) {
+  let i = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (i < items.length) { const idx = i++; try { await fn(items[idx], idx); } catch {} }
+  });
+  await Promise.all(workers);
+}
+
 async function bootstrapDex() {
   try {
     const a = await getJSON("https://api.dexscreener.com/token-profiles/latest/v1");
     const list = Array.isArray(a) ? a : [];
     const sol = list.filter(x => x?.chainId === "solana" && x?.tokenAddress).slice(0, 40);
     console.log("DexScreener bootstrap", sol.length);
-    for (const x of sol) await add({ mint: x.tokenAddress, name: x.description || "Unknown", symbol: "TOKEN" });
+    await mapLimit(sol, 8, x => add({ mint: x.tokenAddress, name: x.description || "Unknown", symbol: "TOKEN" }));
   } catch (e) { console.error("DexScreener bootstrap failed", e.message); }
 }
 
@@ -604,8 +619,16 @@ setInterval(async () => {
   const batch = [];
   for (let i = 0; i < n; i++) batch.push(arr[(refreshCursor + i) % arr.length]);
   refreshCursor = (refreshCursor + n) % arr.length;
-  for (const t of batch) { try { const z = await enrich(t); tokens.set(t.mint, z); broadcast("update", z); } catch (e) { console.error("refresh failed", t.mint, e.message); } }
+  await mapLimit(batch, 8, async t => { try { const z = await enrich(t); tokens.set(t.mint, z); broadcast("update", z); } catch (e) { console.error("refresh failed", t.mint, e.message); } });
 }, REFRESH_INTERVAL_MS);
+
+// Diagnostic heartbeat: if ingestion or enrichment stalls again (e.g. DexScreener/RugCheck rate
+// limiting), this makes it visible in the logs instead of silently showing an empty dashboard.
+setInterval(() => {
+  const all = [...tokens.values()];
+  const withPair = all.filter(t => t.pair).length;
+  console.log(`diag tracked=${all.length} withPair=${withPair} qualified=${getCalls().length} llmCallsToday=${llmCallsToday}`);
+}, 60000);
 
 setInterval(() => resolveOutcomes().catch(e => console.error("resolveOutcomes failed:", e.message)), 2 * 60000);
 
