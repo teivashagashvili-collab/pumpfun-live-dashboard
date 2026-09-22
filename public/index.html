@@ -75,7 +75,7 @@ a{color:var(--green);text-decoration:none}
 @media(max-width:1150px){.kpis{grid-template-columns:repeat(2,1fr)}.layout,.agent{grid-template-columns:1fr}.grid{grid-template-columns:1fr 1fr}.two{grid-template-columns:1fr}}
 @media(max-width:700px){.app{padding:10px}.kpis,.grid{grid-template-columns:1fr 1fr}.brand{font-size:19px}.wallet{margin-left:0}}
 </style></head><body><main class="app">
-<header class="top"><div><div class="brand">PumpScope <b>Live</b></div><div class="muted" style="font-size:12px">Memecoin radar · safety gates · research agent</div></div><input id="q" class="search" placeholder="Search name, ticker or mint"><button id="connect" class="btn primary wallet">Connect Solflare</button><span id="live" class="tag">● LIVE</span></header>
+<header class="top"><div><div class="brand">PumpScope <b>Live</b></div><div class="muted" style="font-size:12px">Memecoin radar · safety gates · research agent</div></div><input id="q" class="search" placeholder="Search name, ticker or mint"><button id="connect" class="btn primary wallet">Track Wallet</button><span id="live" class="tag">● LIVE</span></header>
 <nav class="nav"><button class="active" data-page="radar">Radar</button><button data-page="calls">Qualified</button><button data-page="history">History</button><button data-page="risk">Risk</button><button data-page="market">How it works</button><button data-page="agent">AI Agent</button><button data-page="wallet">Wallet</button></nav>
 
 <section id="radar" class="page active">
@@ -107,7 +107,27 @@ a{color:var(--green);text-decoration:none}
 
 <section id="agent" class="page"><div class="agent"><section class="card chat"><div><small class="muted">AI RESEARCH AGENT</small><h1 style="font-size:20px;margin:4px 0 10px">Ask about the market</h1><div id="chat"></div></div><div class="chips"><button class="chip" data-q="What are the strongest qualified setups right now?">Strongest setups</button><button class="chip" data-q="Which tokens look risky and why?">Risk check</button><button class="chip" data-q="What's your measured track record?">Track record</button></div><div class="inputrow"><input id="ask" placeholder="Ask a question about the live market…"><button id="askbtn" class="btn primary">Ask</button></div></section><aside class="card"><small class="muted">HOW IT ANSWERS</small><p style="font-size:13px">Reads live prices, liquidity, risk flags and the measured outcomes of past calls — never invents facts.</p><div class="notice">Not financial advice. Treat every answer as a research scenario, not a guarantee.</div></aside></div></section>
 
-<section id="wallet" class="page"><div class="two"><section class="card"><small class="muted">CONNECTED WALLET</small><h1 id="wa" style="font-size:19px">Not connected</h1><p id="wn" class="muted">Connect Solflare to view your address and balance.</p><button id="disconnect" class="btn">Disconnect</button></section><section class="card"><small class="muted">SOL BALANCE</small><div id="bal" class="value">—</div><p class="muted">Read-only — no keys requested.</p></section></div></section>
+<section id="wallet" class="page">
+  <section class="card">
+    <small class="muted">TRACK A WALLET</small>
+    <p class="muted" style="margin:4px 0 10px">Paste any Solana public address (no connection, no signing, no private key — read-only). The agent will read its real holdings and can answer questions about it on the AI Agent tab.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <input id="walletInput" class="search" style="flex:1;min-width:240px" placeholder="Solana public address, e.g. 7xKX...">
+      <button id="trackBtn" class="btn primary">Track</button>
+      <button id="untrackBtn" class="btn" style="display:none">Stop tracking</button>
+    </div>
+    <p id="walletStatus" class="muted" style="margin-top:8px"></p>
+  </section>
+  <div id="walletSummary" class="two" style="display:none;margin-top:14px">
+    <section class="card"><small class="muted">TRACKED ADDRESS</small><h1 id="wa" style="font-size:16px;word-break:break-all">—</h1><div class="muted" id="wSol">—</div></section>
+    <section class="card"><small class="muted">TOTAL PORTFOLIO VALUE</small><div id="wTotal" class="value">—</div><p class="muted">Read-only — no keys requested, nothing here can trade.</p></section>
+  </div>
+  <section class="card" id="walletHoldingsCard" style="display:none;margin-top:14px">
+    <small class="muted">HOLDINGS</small>
+    <div class="scroll"><table><thead><tr><th>Token</th><th>Amount</th><th>Price</th><th>Value</th><th>Risk</th><th>Score</th><th>Status</th></tr></thead><tbody id="walletRows"></tbody></table></div>
+    <p id="walletTruncNote" class="muted" style="display:none;margin-top:6px">Showing the top holdings by value; smaller dust balances are hidden.</p>
+  </section>
+</section>
 </main>
 <script>
 (function(){
@@ -279,7 +299,11 @@ a{color:var(--green);text-decoration:none}
   async function ask(){
     const input=$("ask"),question=input.value.trim();if(!question)return;
     const chat=$("chat");chat.innerHTML+='<div class="msg user">'+esc(question)+'</div>';input.value="";
-    try{const d=await json("/api/agent?q="+encodeURIComponent(question));chat.innerHTML+='<div class="msg">'+esc(d.answer||"No answer returned.")+'</div>'}
+    try{
+      let url="/api/agent?q="+encodeURIComponent(question);
+      if(wallet)url+="&wallet="+encodeURIComponent(wallet);
+      const d=await json(url);chat.innerHTML+='<div class="msg">'+esc(d.answer||"No answer returned.")+'</div>'
+    }
     catch(e){console.error(e);chat.innerHTML+='<div class="msg">Agent connection failed. The live scanner is still running.</div>'}
     chat.scrollTop=chat.scrollHeight;
   }
@@ -295,12 +319,67 @@ a{color:var(--green);text-decoration:none}
     ["snapshot","token","update"].forEach(k=>ev.addEventListener(k,e=>{try{const d=JSON.parse(e.data);(k==="snapshot"?d:[d]).forEach(t=>t&&t.mint&&M.set(t.mint,t));draw()}catch(err){console.error("stream event",err)}}));
   }
 
-  let wallet=null;
-  async function connectWallet(){
-    try{if(!window.solflare){alert("Install Solflare or open PumpScope inside Solflare.");return}await window.solflare.connect();wallet=window.solflare.publicKey?.toString();if(wallet){$("wa").textContent=wallet.slice(0,7)+"…"+wallet.slice(-7);$("wn").textContent=wallet;const d=await json("/api/wallet?address="+encodeURIComponent(wallet));if(!d.error)$("bal").textContent=Number(d.balanceSol).toFixed(4)+" SOL"}}catch(e){console.error(e)}
+  // ---- Wallet tracking: read-only. The user supplies a public Solana address; we never ask for
+  // a private key or a wallet-connect signature, and nothing here can submit a transaction. ----
+  let wallet=null,walletPollTimer=null;
+  const ADDR_RE=/^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+  function renderPortfolio(d){
+    $("walletSummary").style.display="";
+    $("walletHoldingsCard").style.display="";
+    $("wa").textContent=d.address;
+    $("wSol").textContent=Number(d.solBalance).toFixed(4)+" SOL"+(d.solValueUsd!=null?" (~"+money(d.solValueUsd)+")":"");
+    $("wTotal").textContent=money(d.totalValueUsd);
+    $("walletTruncNote").style.display=d.holdingsTruncated?"":"none";
+    const rows=d.holdings||[];
+    $("walletRows").innerHTML=rows.length?rows.map(h=>{
+      const s=h.signal||{},r=h.rug||{};
+      const riskClass=r.rugged||Number(r.scoreNormalized)>=45?"risk":Number(r.scoreNormalized)>=30?"warn":"";
+      const scoreClass=Number(s.score)>=72?"":Number(s.score)>=62?"warn":"risk";
+      const qualifiedNow=s.score!=null?(s.score>=72&&Number(r.scoreNormalized||0)<45):null;
+      const t={metadataImage:h.metadataImage,symbol:h.symbol,name:h.name};
+      return '<tr><td><div class="token-cell">'+avatar(t)+'<div><div class="token-name">'+esc(h.name||"Unknown token")+'</div><div class="token-sub">'+esc(h.symbol||"—")+'</div></div></div></td><td>'+(Number(h.uiAmount)?Number(h.uiAmount).toLocaleString(undefined,{maximumFractionDigits:4}):"—")+'</td><td>'+money(h.priceUsd)+'</td><td>'+money(h.valueUsd)+'</td><td>'+(r.scoreNormalized==null?'<span class="badge">CHECK</span>':'<span class="badge '+riskClass+'">'+Math.round(r.scoreNormalized)+'</span>')+'</td><td>'+(s.score==null?"—":'<span class="badge '+scoreClass+'">'+s.score+'</span>')+'</td><td class="muted" style="font-size:12px">'+(qualifiedNow==null?"—":qualifiedNow?"passes every gate":"does not currently qualify")+'</td></tr>';
+    }).join(""):'<tr><td colspan="7" class="empty">No SPL token holdings found for this address.</td></tr>';
   }
-  $("connect").onclick=connectWallet;
-  $("disconnect").onclick=()=>{try{window.solflare?.disconnect()}catch{}wallet=null;$("wa").textContent="Not connected";$("wn").textContent="Connect Solflare to view your address and balance.";$("bal").textContent="—"};
+
+  async function loadPortfolio(address,silent){
+    if(!silent)$("walletStatus").textContent="Loading holdings…";
+    try{
+      const d=await json("/api/portfolio?address="+encodeURIComponent(address));
+      if(d.error){$("walletStatus").textContent=d.error;return}
+      $("walletStatus").textContent="Live · updates every 20s";
+      renderPortfolio(d);
+    }catch(e){console.error(e);if(!silent)$("walletStatus").textContent="Couldn't load that wallet right now."}
+  }
+
+  function startTracking(address,fromRestore){
+    if(!ADDR_RE.test(address)){$("walletStatus").textContent="That doesn't look like a valid Solana address.";return}
+    wallet=address;
+    try{localStorage.setItem("pumpscope_wallet",address)}catch{}
+    $("walletInput").value=address;
+    $("untrackBtn").style.display="";
+    loadPortfolio(address,fromRestore);
+    clearInterval(walletPollTimer);
+    walletPollTimer=setInterval(()=>loadPortfolio(address,true),20000);
+  }
+
+  function stopTracking(){
+    wallet=null;
+    try{localStorage.removeItem("pumpscope_wallet")}catch{}
+    clearInterval(walletPollTimer);
+    $("walletInput").value="";
+    $("walletStatus").textContent="";
+    $("walletSummary").style.display="none";
+    $("walletHoldingsCard").style.display="none";
+    $("untrackBtn").style.display="none";
+  }
+
+  $("connect").onclick=()=>{document.querySelector('[data-page="wallet"]').click();$("walletInput").focus()};
+  $("trackBtn").onclick=()=>startTracking(($("walletInput").value||"").trim(),false);
+  $("walletInput").onkeydown=e=>{if(e.key==="Enter")startTracking(($("walletInput").value||"").trim(),false)};
+  $("untrackBtn").onclick=stopTracking;
+  try{const saved=localStorage.getItem("pumpscope_wallet");if(saved&&ADDR_RE.test(saved))startTracking(saved,true)}catch{}
+
   $("q").oninput=draw;
 
   connectStream();
