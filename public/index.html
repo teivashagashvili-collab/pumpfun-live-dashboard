@@ -76,7 +76,7 @@ a{color:var(--green);text-decoration:none}
 @media(max-width:700px){.app{padding:10px}.kpis,.grid{grid-template-columns:1fr 1fr}.brand{font-size:19px}.wallet{margin-left:0}}
 </style></head><body><main class="app">
 <header class="top"><div><div class="brand">PumpScope <b>Live</b></div><div class="muted" style="font-size:12px">Memecoin radar · safety gates · research agent</div></div><input id="q" class="search" placeholder="Search name, ticker or mint"><button id="connect" class="btn primary wallet">Connect Solflare</button><span id="live" class="tag">● LIVE</span></header>
-<nav class="nav"><button class="active" data-page="radar">Radar</button><button data-page="calls">Qualified</button><button data-page="risk">Risk</button><button data-page="market">How it works</button><button data-page="agent">AI Agent</button><button data-page="wallet">Wallet</button></nav>
+<nav class="nav"><button class="active" data-page="radar">Radar</button><button data-page="calls">Qualified</button><button data-page="history">History</button><button data-page="risk">Risk</button><button data-page="market">How it works</button><button data-page="agent">AI Agent</button><button data-page="wallet">Wallet</button></nav>
 
 <section id="radar" class="page active">
 <div class="kpis"><div class="card"><div class="kpi-label">Tracked</div><div id="n" class="value">0</div></div><div id="qCard" class="card" style="cursor:pointer" title="Click to show only qualified coins"><div class="kpi-label">Qualified</div><div id="s" class="value pos">0</div></div><div class="card"><div class="kpi-label">Risk flags</div><div id="r" class="value neg">0</div></div><div class="card"><div class="kpi-label">Stream</div><div id="st" class="value" style="font-size:15px">Connecting…</div></div></div>
@@ -87,6 +87,12 @@ a{color:var(--green);text-decoration:none}
 <div class="hero"><small class="muted">QUALIFIED WATCHLIST</small><h1>Evidence-backed setups</h1><p>Only tokens that pass every safety and liquidity gate show up here. It's normal to see none — a strict bar means most of the market gets filtered out.</p></div>
 <div id="perfBox" class="card" style="margin-bottom:12px;display:none"><div class="kpi-label" style="margin-bottom:8px">Measured track record <span class="muted" style="text-transform:none;font-weight:400">— what actually happened after a call, not a promise</span></div><div id="perfRow" class="perf-row"></div></div>
 <div id="callsGrid" class="grid"></div>
+<div id="nearMissWrap" style="display:none;margin-top:18px"><div class="kpi-label" style="margin-bottom:8px">Close, but not qualified <span class="muted" style="text-transform:none;font-weight:400">— missing one gate (usually liquidity or risk), shown for context only</span></div><div id="nearMissGrid" class="grid"></div></div>
+</section>
+
+<section id="history" class="page">
+<div class="hero"><small class="muted">CALL HISTORY</small><h1>Every logged call, with what actually happened</h1><p>Each row is a real qualified call at the moment it fired, with its price then and its measured return since — net of an assumed round-trip trading cost. Pending means the timeframe hasn't elapsed yet.</p></div>
+<section class="box"><div class="head">Recent calls</div><div class="scroll"><table><thead><tr><th>Token</th><th>Called</th><th>Entry</th><th>Score</th><th>5m</th><th>15m</th><th>1h</th></tr></thead><tbody id="historyRows"><tr><td colspan="7" class="empty">Loading history…</td></tr></tbody></table></div></section>
 </section>
 
 <section id="risk" class="page">
@@ -206,7 +212,43 @@ a{color:var(--green);text-decoration:none}
         const p=t.tradePlan||{},ex=p.exits||[];
         return '<div class="call"><div class="call-head">'+avatar(t)+'<div><div class="title">'+esc(t.name||"—")+' · '+esc(t.symbol||"—")+'</div><small class="muted">'+esc(t.callType||"QUALIFIED")+'</small></div></div><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><div class="score">'+Number(t.signal?.score||0)+'/100</div>'+sparkline(t.chart,90,28)+'</div><p class="muted" style="font-size:12.5px;margin:0 0 8px">'+money(t.pair?.marketCap||t.pair?.fdv)+' MC · '+money(t.pair?.liquidity?.usd)+' liq</p><div class="statline"><span>Entry</span><b>'+(p.eligible?money(p.entry?.low)+" – "+money(p.entry?.high):"NO ENTRY")+'</b></div><div class="statline"><span>Invalidation</span><b>'+(p.invalidation?money(p.invalidation.price):"—")+'</b></div><div class="statline"><span>Profit ladder</span><b>'+ex.slice(0,3).map(x=>"+"+((Number(x.multiple)-1)*100).toFixed(0)+"%").join(" · ")+'</b></div><a target="_blank" rel="noopener" href="'+esc(dex(t))+'" style="display:block;margin-top:8px">Open market →</a></div>';
       }).join(""):'<div class="card empty">No qualified opportunities right now — the scanner is intentionally allowed to make no call when gates aren\'t met.</div>';
+      renderNearMiss(!Array.isArray(c)||!c.length);
     }catch(e){console.error("calls failed",e);box.innerHTML='<div class="card empty">Qualified data temporarily unavailable. Refreshing automatically…</div>'}
+  }
+
+  // Shown only when nothing is fully qualified, so the page isn't just a dead end: tokens that
+  // are close (decent score, no active risk flag) but miss the liquidity/volume bar. Clearly
+  // labeled as NOT qualified — this is context, not a call.
+  function isNearMiss(t){
+    return !!(t.quality&&t.pair&&t.signal?.score>=60&&!(t.rug?.rugged||Number(t.rug?.scoreNormalized)>=45)&&!isQualified(t));
+  }
+  function renderNearMiss(show){
+    const wrap=$("nearMissWrap");
+    if(!show){wrap.style.display="none";return}
+    const z=[...M.values()].filter(isNearMiss).sort((a,b)=>(b.signal?.score||0)-(a.signal?.score||0)).slice(0,6);
+    if(!z.length){wrap.style.display="none";return}
+    wrap.style.display="";
+    $("nearMissGrid").innerHTML=z.map(t=>{
+      const p=t.pair||{};
+      const missing=Number(p.liquidity?.usd||0)<10000?"needs more liquidity":Number(p.volume?.h1||0)<15000?"needs more volume":"needs more trade activity";
+      return '<div class="call"><div class="call-head">'+avatar(t)+'<div><div class="title">'+esc(t.name||"—")+' · '+esc(t.symbol||"—")+'</div><small class="muted">'+esc(missing)+'</small></div></div><div style="display:flex;align-items:center;justify-content:space-between"><div class="score" style="color:var(--amber)">'+Number(t.signal?.score||0)+'/100</div>'+sparkline(t.chart,90,28)+'</div></div>';
+    }).join("");
+  }
+
+  async function loadHistory(){
+    const box=$("historyRows");
+    try{
+      const rows=await json("/api/call-history?limit=60");
+      const cell=(resolved,net,at)=>{
+        if(!at)return'<span class="muted">pending</span>';
+        if(resolved==null)return'<span class="muted">no data</span>';
+        return '<span class="'+(Number(net)>=0?"pos":"neg")+'">'+(Number(net)>=0?"+":"")+Number(net).toFixed(1)+'%</span>';
+      };
+      box.innerHTML=Array.isArray(rows)&&rows.length?rows.map(r=>{
+        const when=r.flagged_at?new Date(r.flagged_at).toLocaleString():"—";
+        return '<tr><td><b>'+esc(r.name||"—")+'</b> <small class="muted">'+esc(r.symbol||"")+'</small></td><td><small class="muted">'+esc(when)+'</small></td><td>'+money(r.entry_price)+'</td><td><span class="badge">'+(r.score??"—")+'</span></td><td>'+cell(r.resolved_5m,r.net_5m,r.resolved_5m_at)+'</td><td>'+cell(r.resolved_15m,r.net_15m,r.resolved_15m_at)+'</td><td>'+cell(r.resolved_1h,r.net_1h,r.resolved_1h_at)+'</td></tr>';
+      }).join(""):'<tr><td colspan="7" class="empty">No calls logged yet — check back once the scanner has flagged a few qualified tokens.</td></tr>';
+    }catch(e){console.error("history failed",e);box.innerHTML='<tr><td colspan="7" class="empty">History temporarily unavailable.</td></tr>'}
   }
 
   function loadRisk(){
@@ -225,6 +267,7 @@ a{color:var(--green);text-decoration:none}
       const page=$(nav.dataset.page); if(page)page.classList.add("active");
       if(nav.dataset.page==="calls")loadCalls();
       if(nav.dataset.page==="risk")loadRisk();
+      if(nav.dataset.page==="history")loadHistory();
       return;
     }
     const row=e.target.closest("tr.coin-row");
