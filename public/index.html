@@ -85,7 +85,7 @@ a{color:var(--green);text-decoration:none}
 
 <section id="calls" class="page">
 <div class="hero"><small class="muted">QUALIFIED WATCHLIST</small><h1>Evidence-backed setups</h1><p>Only tokens that pass every safety and liquidity gate show up here. It's normal to see none — a strict bar means most of the market gets filtered out.</p></div>
-<div id="perfBox" class="card" style="margin-bottom:12px;display:none"><div class="kpi-label" style="margin-bottom:8px">Measured track record <span class="muted" style="text-transform:none;font-weight:400">— what actually happened after a call, not a promise</span></div><div id="perfRow" class="perf-row"></div></div>
+<div id="perfBox" class="card" style="margin-bottom:12px;display:none"><div class="kpi-label" style="margin-bottom:8px">Measured track record <span class="muted" style="text-transform:none;font-weight:400">— what actually happened after a call, not a promise</span></div><div id="perfRow" class="perf-row"></div><p id="paperLine" class="muted" style="font-size:12px;margin:10px 0 0;display:none"></p></div>
 <div id="calBox" class="card" style="margin-bottom:12px;display:none"><div class="kpi-label" style="margin-bottom:8px">Score calibration <span class="muted" style="text-transform:none;font-weight:400">— does a higher score actually win more often?</span></div><div id="calRows"></div></div>
 <div id="callsGrid" class="grid"></div>
 <div id="nearMissWrap" style="display:none;margin-top:18px"><div class="kpi-label" style="margin-bottom:8px">Close, but not qualified <span class="muted" style="text-transform:none;font-weight:400">— missing one gate (usually liquidity or risk), shown for context only</span></div><div id="nearMissGrid" class="grid"></div></div>
@@ -225,6 +225,13 @@ a{color:var(--green);text-decoration:none}
       $("perfBox").style.display="";
       $("perfRow").innerHTML=perfPill("5 min",p.timeframes["5m"])+perfPill("15 min",p.timeframes["15m"])+perfPill("1 hour",p.timeframes["1h"]);
     }catch(e){console.error("performance failed",e)}
+    try{
+      const pt=await json("/api/paper-track?timeframe=1h");
+      if(pt&&pt.trades){
+        $("paperLine").style.display="";
+        $("paperLine").innerHTML="Simulated: $"+pt.notionalPerTrade+" per call across "+pt.trades+" calls held to 1h → cumulative <b class=\""+(pt.cumulativePnl>=0?"pos":"neg")+"\">"+(pt.cumulativePnl>=0?"+":"")+"$"+pt.cumulativePnl+" ("+(pt.cumulativeReturnPct>=0?"+":"")+pt.cumulativeReturnPct+"%)</b> — hypothetical, not a real balance.";
+      }
+    }catch(e){console.error("paper track failed",e)}
   }
 
   async function loadCalibration(){
