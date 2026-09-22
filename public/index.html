@@ -161,7 +161,7 @@ a{color:var(--green);text-decoration:none}
     }).join(""):'<tr><td colspan="8" class="empty">Waiting for live market data…</td></tr>';
     $("n").textContent=all.length;
     $("r").textContent=all.filter(t=>t.rug&&(t.rug.rugged||Number(t.rug.scoreNormalized)>=45)).length;
-    $("s").textContent=all.filter(t=>t.quality&&t.signal?.score>=72&&t.pair&&Number(t.pair.liquidity?.usd)>=10000).length;
+    $("s").textContent=all.filter(isQualified).length;
     $("feed").innerHTML=z.slice(0,8).map(t=>'<div class="item">'+avatar(t)+'<div><b>'+esc(t.symbol||"—")+'</b><br><small class="muted">'+Number(t.signal?.score||0)+'/100 · '+esc(t.category||"—")+'</small></div></div>').join("")||'<div class="empty">Waiting for data.</div>';
   }
 
