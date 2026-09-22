@@ -1,27 +1,107 @@
 <!doctype html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#050b09"><title>PumpScope — Market Intelligence</title>
 <style>
-:root{--bg:#050b09;--panel:#0a1512;--panel2:#0e1e18;--line:#19352b;--text:#edf8f3;--muted:#819c92;--green:#4df2ad;--red:#ff6b83;--amber:#ffd166;--blue:#7fb0ff}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% 0,#12382a 0,#050b09 38%);color:var(--text);font:14px Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;line-height:1.45}.app{max-width:1580px;margin:auto;padding:18px}.top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.brand{font-size:25px;font-weight:950;letter-spacing:-.7px}.brand b,.green{color:var(--green)}.muted,small{color:var(--muted)}.search{flex:1;min-width:240px;max-width:620px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:#07110e;color:#fff;outline:none}.btn,.nav button{border:1px solid var(--line);background:#0b1915;color:var(--text);padding:10px 13px;border-radius:10px;cursor:pointer;font-weight:850}.btn.primary,.nav button.active{background:var(--green);color:#06100d;border-color:var(--green)}.wallet{margin-left:auto}.nav{display:flex;gap:7px;margin:16px 0;overflow:auto}.kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:9px;margin-bottom:12px}.card,.box{background:rgba(9,21,18,.96);border:1px solid var(--line);border-radius:15px;padding:14px}.value{font-size:24px;font-weight:950;margin-top:4px}.layout{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:12px}.box{padding:0;overflow:hidden}.head{padding:14px;border-bottom:1px solid var(--line);font-weight:900}.scroll{overflow:auto}table{width:100%;border-collapse:collapse;min-width:1180px}th,td{padding:10px 11px;border-bottom:1px solid #143026;text-align:left;vertical-align:middle}th{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px}tr:hover{background:#0d211b}.coin-row{cursor:pointer}.badge{display:inline-block;padding:4px 7px;border-radius:999px;background:#4df2ad18;color:var(--green);font-weight:900;font-size:10px;white-space:nowrap}.risk{background:#ff6b8318!important;color:var(--red)!important}.warn{background:#ffd16618!important;color:var(--amber)!important}.blue{color:var(--blue)}a{color:var(--green);text-decoration:none}.feed{padding:11px}.item{padding:10px;border:1px solid #173229;border-radius:10px;margin-bottom:7px}.page{display:none}.page.active{display:block}.hero{display:grid;grid-template-columns:1.35fr .65fr;gap:12px}.hero h1{font-size:32px;margin:4px 0 8px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.call{padding:14px;border:1px solid var(--line);border-radius:13px;background:#0a1814}.call .score{font-size:27px;font-weight:950;color:var(--green)}.call .title{font-size:17px;font-weight:900}.agent{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:12px}.chat{min-height:560px}.msg{padding:12px;border-radius:12px;background:#0e211b;margin:9px 0;white-space:pre-wrap}.msg.user{background:#14382d}.inputrow{display:flex;gap:8px;margin-top:12px}.inputrow input{flex:1;padding:12px;border-radius:10px;border:1px solid var(--line);background:#07110e;color:#fff}.chips{display:flex;gap:7px;flex-wrap:wrap;margin:10px 0}.chip{padding:7px 9px;border:1px solid var(--line);border-radius:99px;background:#0a1814;color:var(--text);cursor:pointer}.notice{padding:10px;border:1px solid #4a3d18;background:#1d190b;color:#ead28a;border-radius:10px;margin:10px 0}.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}.statline{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid #173127;padding:8px 0}.empty{padding:40px;text-align:center;color:var(--muted)}canvas{display:block}@media(max-width:1150px){.kpis{grid-template-columns:repeat(3,1fr)}.layout,.hero,.agent{grid-template-columns:1fr}.grid{grid-template-columns:1fr 1fr}}@media(max-width:700px){.app{padding:10px}.kpis,.grid,.two{grid-template-columns:1fr 1fr}.brand{font-size:21px}.wallet{margin-left:0}}
+:root{--bg:#050b09;--panel:#0a1512;--panel2:#0e1e18;--line:#19352b;--text:#edf8f3;--muted:#7f9a90;--green:#4df2ad;--red:#ff6b83;--amber:#ffd166;--blue:#7fb0ff}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(circle at 15% 0,#12382a 0,#050b09 38%);color:var(--text);font:14px Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;line-height:1.45}
+.app{max-width:1440px;margin:auto;padding:18px}
+.top{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.brand{font-size:23px;font-weight:900;letter-spacing:-.5px}
+.brand b{color:var(--green)}
+.muted{color:var(--muted)}
+.search{flex:1;min-width:200px;max-width:520px;padding:11px 14px;border:1px solid var(--line);border-radius:12px;background:#07110e;color:#fff;outline:none;font-size:14px}
+.btn{border:1px solid var(--line);background:#0b1915;color:var(--text);padding:10px 13px;border-radius:10px;cursor:pointer;font-weight:700;font-size:13px}
+.btn.primary{background:var(--green);color:#06100d;border-color:var(--green)}
+.wallet{margin-left:auto}
+.nav{display:flex;gap:6px;margin:16px 0;overflow:auto}
+.nav button{border:1px solid var(--line);background:#0b1915;color:var(--text);padding:9px 14px;border-radius:10px;cursor:pointer;font-weight:700;font-size:13px;white-space:nowrap}
+.nav button.active{background:var(--green);color:#06100d;border-color:var(--green)}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-bottom:12px}
+.card,.box{background:rgba(9,21,18,.96);border:1px solid var(--line);border-radius:15px;padding:14px}
+.kpi-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+.value{font-size:23px;font-weight:900;margin-top:3px}
+.layout{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:12px}
+.box{padding:0;overflow:hidden}
+.head{padding:13px 14px;border-bottom:1px solid var(--line);font-weight:800;display:flex;align-items:center;justify-content:space-between;gap:8px}
+.scroll{overflow:auto}
+table{width:100%;border-collapse:collapse;min-width:820px}
+th,td{padding:10px 11px;border-bottom:1px solid #143026;text-align:left;vertical-align:middle}
+th{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;position:sticky;top:0;background:#0a1512}
+tr:hover{background:#0d211b}
+.coin-row{cursor:pointer}
+.token-cell{display:flex;align-items:center;gap:9px}
+.avatar{width:32px;height:32px;border-radius:50%;flex-shrink:0;object-fit:cover;background:#12281f;border:1px solid var(--line)}
+.avatar-fallback{width:32px;height:32px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-weight:900;font-size:13px;background:linear-gradient(135deg,#1c4232,#0e2019);color:var(--green);border:1px solid var(--line)}
+.token-name{font-weight:800;font-size:13.5px}
+.token-sub{color:var(--muted);font-size:11.5px;display:flex;align-items:center;gap:5px}
+.tag{display:inline-block;padding:2px 6px;border-radius:6px;font-size:9.5px;font-weight:800;letter-spacing:.3px;background:#4df2ad18;color:var(--green)}
+.tag.risk{background:#ff6b8318;color:var(--red)}
+.tag.warn{background:#ffd16618;color:var(--amber)}
+.badge{display:inline-block;padding:4px 8px;border-radius:999px;background:#4df2ad18;color:var(--green);font-weight:800;font-size:11px;white-space:nowrap}
+.badge.risk{background:#ff6b8318;color:var(--red)}
+.badge.warn{background:#ffd16618;color:var(--amber)}
+.blue{color:var(--blue)}
+.pos{color:var(--green)}.neg{color:var(--red)}
+a{color:var(--green);text-decoration:none}
+.feed{padding:11px}
+.item{padding:10px;border:1px solid #173229;border-radius:10px;margin-bottom:7px;display:flex;align-items:center;gap:9px}
+.page{display:none}
+.page.active{display:block}
+.hero{background:linear-gradient(135deg,#0d2119,#0a1512);border:1px solid var(--line);border-radius:15px;padding:18px;margin-bottom:12px}
+.hero h1{font-size:24px;margin:2px 0 6px}
+.hero p{color:var(--muted);margin:0;max-width:640px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.call{padding:14px;border:1px solid var(--line);border-radius:13px;background:#0a1814}
+.call-head{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.call .score{font-size:22px;font-weight:900;color:var(--green)}
+.call .title{font-size:14.5px;font-weight:800}
+.spark{display:block}
+.agent{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:12px}
+.chat{min-height:520px;display:flex;flex-direction:column}
+.msg{padding:11px 13px;border-radius:12px;background:#0e211b;margin:8px 0;white-space:pre-wrap;font-size:13.5px}
+.msg.user{background:#14382d}
+.inputrow{display:flex;gap:8px;margin-top:auto;padding-top:10px}
+.inputrow input{flex:1;padding:12px;border-radius:10px;border:1px solid var(--line);background:#07110e;color:#fff}
+.chips{display:flex;gap:7px;flex-wrap:wrap;margin:8px 0}
+.chip{padding:7px 10px;border:1px solid var(--line);border-radius:99px;background:#0a1814;color:var(--text);cursor:pointer;font-size:12.5px}
+.notice{padding:10px 12px;border:1px solid #244036;background:#0c1a15;color:var(--muted);border-radius:10px;margin:10px 0;font-size:12.5px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.statline{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid #173127;padding:7px 0;font-size:13px}
+.empty{padding:36px;text-align:center;color:var(--muted)}
+.perf-row{display:flex;gap:10px;flex-wrap:wrap}
+.perf-pill{flex:1;min-width:110px;background:#0a1814;border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.perf-pill .n{font-size:18px;font-weight:900}
+.perf-pill .lbl{font-size:10.5px;color:var(--muted);text-transform:uppercase}
+@media(max-width:1150px){.kpis{grid-template-columns:repeat(2,1fr)}.layout,.agent{grid-template-columns:1fr}.grid{grid-template-columns:1fr 1fr}.two{grid-template-columns:1fr}}
+@media(max-width:700px){.app{padding:10px}.kpis,.grid{grid-template-columns:1fr 1fr}.brand{font-size:19px}.wallet{margin-left:0}}
 </style></head><body><main class="app">
-<header class="top"><div><div class="brand">PumpScope <b>Money Intelligence</b></div><div class="muted">LIVE MEMECOIN RADAR · SAFETY GATES · MARKET REGIMES · RESEARCH AGENT</div></div><input id="q" class="search" placeholder="Search name, ticker or Solana mint"><button id="connect" class="btn primary wallet">Connect Solflare</button><span id="live" class="green">● LIVE</span></header>
-<nav class="nav"><button class="active" data-page="radar">Radar</button><button data-page="calls">Qualified</button><button data-page="risk">Risk Lab</button><button data-page="market">Market Theory</button><button data-page="agent">AI Agent</button><button data-page="wallet">Wallet</button></nav>
+<header class="top"><div><div class="brand">PumpScope <b>Live</b></div><div class="muted" style="font-size:12px">Memecoin radar · safety gates · research agent</div></div><input id="q" class="search" placeholder="Search name, ticker or mint"><button id="connect" class="btn primary wallet">Connect Solflare</button><span id="live" class="tag">● LIVE</span></header>
+<nav class="nav"><button class="active" data-page="radar">Radar</button><button data-page="calls">Qualified</button><button data-page="risk">Risk</button><button data-page="market">How it works</button><button data-page="agent">AI Agent</button><button data-page="wallet">Wallet</button></nav>
 
 <section id="radar" class="page active">
-<div class="kpis"><div class="card"><small>LIVE TRACKED</small><div id="n" class="value">0</div></div><div class="card"><small>QUALIFIED</small><div id="s" class="value green">0</div></div><div class="card"><small>RISK FLAGS</small><div id="r" class="value" style="color:var(--red)">0</div></div><div class="card"><small>EARLY</small><div id="e" class="value">0</div></div><div class="card"><small>LEARNING SAMPLES</small><div id="l" class="value">0</div></div><div class="card"><small>STREAM</small><div id="st" class="value" style="font-size:16px">Connecting…</div></div></div>
-<div class="notice"><b>Design principle:</b> the discovery board can show the market, but the money board is gated. Large established caps, thin liquidity, weak activity, poor volume/liquidity and elevated RugCheck risk are not promoted as early opportunities.</div>
-<div class="layout"><section class="box"><div class="head">Live opportunity radar <span class="muted">Sorted by evidence, not hype</span></div><div class="scroll"><table><thead><tr><th>Token</th><th>Class</th><th>Price</th><th>5m</th><th>1h</th><th>MC / FDV</th><th>Liquidity</th><th>1h Vol</th><th>Flow</th><th>Risk</th><th>Score</th><th>Chart</th></tr></thead><tbody id="rows"><tr><td colspan="12" class="empty">Waiting for verified live market data…</td></tr></tbody></table></div></section><aside class="box"><div class="head">Why these matter</div><div id="feed" class="feed"></div><div class="feed muted">No score is a profit guarantee. The system is intentionally allowed to return no qualified setup when evidence is weak.</div></aside></div>
+<div class="kpis"><div class="card"><div class="kpi-label">Tracked</div><div id="n" class="value">0</div></div><div class="card"><div class="kpi-label">Qualified</div><div id="s" class="value pos">0</div></div><div class="card"><div class="kpi-label">Risk flags</div><div id="r" class="value neg">0</div></div><div class="card"><div class="kpi-label">Stream</div><div id="st" class="value" style="font-size:15px">Connecting…</div></div></div>
+<div class="layout"><section class="box"><div class="head">Live radar <span class="muted" style="font-weight:400;font-size:12px">Sorted by score</span></div><div class="scroll"><table><thead><tr><th>Token</th><th>Price</th><th>5m</th><th>1h</th><th>Liquidity</th><th>Risk</th><th>Score</th><th>Trend</th></tr></thead><tbody id="rows"><tr><td colspan="8" class="empty">Waiting for live market data…</td></tr></tbody></table></div></section><aside class="box"><div class="head">Top movers</div><div id="feed" class="feed"></div></aside></div>
 </section>
 
-<section id="calls" class="page"><div class="hero"><section class="card"><small>QUALIFIED OPPORTUNITIES</small><h1>Evidence-backed watchlist</h1><p class="muted">The call engine is deliberately narrow. It seeks fresh or developing tokens with enough liquidity and activity to trade, positive market structure, and no major safety flag.</p></section><section class="card"><small>REJECTION LOGIC</small><p>Risk gate → liquidity gate → activity gate → volume/liquidity gate → market-cap gate → momentum/flow score.</p></section></div><div style="height:12px"></div><div id="callsGrid" class="grid"></div></section>
+<section id="calls" class="page">
+<div class="hero"><small class="muted">QUALIFIED WATCHLIST</small><h1>Evidence-backed setups</h1><p>Only tokens that pass every safety and liquidity gate show up here. It's normal to see none — a strict bar means most of the market gets filtered out.</p></div>
+<div id="perfBox" class="card" style="margin-bottom:12px;display:none"><div class="kpi-label" style="margin-bottom:8px">Measured track record <span class="muted" style="text-transform:none;font-weight:400">— what actually happened after a call, not a promise</span></div><div id="perfRow" class="perf-row"></div></div>
+<div id="callsGrid" class="grid"></div>
+</section>
 
-<section id="risk" class="page"><div class="hero"><section class="card"><small>SAFETY FIRST</small><h1>Risk laboratory</h1><p class="muted">Rug detection is not a single indicator. PumpScope combines RugCheck status with liquidity, activity breadth, volume/liquidity and market-cap context.</p></section><section class="card"><small>IMPORTANT</small><p>Solana memecoin fraud often manifests through liquidity manipulation, concentration and social/market dynamics rather than a simple malicious contract switch. Recent research supports using early on-chain behavior and multiple data sources rather than one flag.</p></section></div><div style="height:12px"></div><div id="riskGrid" class="grid"></div></section>
+<section id="risk" class="page">
+<div class="hero"><small class="muted">SAFETY</small><h1>Elevated-risk tokens</h1><p>Combines RugCheck status with liquidity, activity and market-cap context — not a single indicator.</p></div>
+<div id="riskGrid" class="grid"></div>
+</section>
 
-<section id="market" class="page"><div class="two"><section class="card"><small>MARKET MICROSTRUCTURE</small><h1>Living market model</h1><div class="statline"><span>Momentum</span><b>5m + 1h price change</b></div><div class="statline"><span>Flow</span><b>Buy / sell balance</b></div><div class="statline"><span>Liquidity</span><b>Depth and trade survivability</b></div><div class="statline"><span>Activity</span><b>Transaction breadth + volume</b></div><div class="statline"><span>Reflexivity</span><b>Attention → flow → price feedback</b></div><div class="statline"><span>Risk of ruin</span><b>Safety gates dominate excitement</b></div></section><section class="card"><small>THEORIES</small><h1>What the agent can reason about</h1><p><b>Momentum:</b> persistent short-horizon price/flow can attract more participation, but reversals are common.</p><p><b>Reflexivity:</b> rising price can attract attention, which can increase demand and reinforce price—until the feedback breaks.</p><p><b>Liquidity preference:</b> a move in a thin pool can look spectacular while offering poor exit capacity.</p><p><b>Attention/volume:</b> social attention is difficult to measure directly here, so trading activity is used only as an observable proxy.</p><p><b>Survivorship and base rates:</b> a few spectacular winners can hide a much larger population of failures; the scanner therefore measures rejected tokens too.</p></section></div></section>
+<section id="market" class="page"><div class="two">
+<section class="card"><h1 style="font-size:19px">What the scanner looks at</h1><div class="statline"><span>Momentum</span><b>5m + 1h price change</b></div><div class="statline"><span>Flow</span><b>Buy / sell balance</b></div><div class="statline"><span>Liquidity</span><b>Can you actually exit</b></div><div class="statline"><span>Activity</span><b>Trade count + volume</b></div><div class="statline"><span>Risk gate</span><b>RugCheck + concentration</b></div></section>
+<section class="card"><h1 style="font-size:19px">Honest limits</h1><p class="muted">A qualified setup is a rules-based research candidate, not a guarantee. Pump.fun tokens are frequently manipulated, and past patterns can stop working without warning.</p><p class="muted">Every qualified call is logged with its entry price, and its real 5m/15m/1h outcome is measured automatically — see the track record on the Qualified tab.</p></section>
+</div></section>
 
-<section id="agent" class="page"><div class="agent"><section class="card chat"><small>AI MARKET RESEARCHER</small><h1>Talk to the market</h1><div id="chat"><div class="msg"><b>Agent</b><br>I can explain any token, compare setups, inspect risk, explain a chart, discuss market theory, or tell you why a candidate was rejected.</div></div><div class="chips"><button class="chip" data-q="What are the strongest qualified setups right now?">Strongest setups</button><button class="chip" data-q="Which tokens look risky and why?">Risk analysis</button><button class="chip" data-q="What is the current market regime?">Market regime</button><button class="chip" data-q="What are you learning from the charts?">Learning</button></div><div class="inputrow"><input id="ask" placeholder="Ask a real question about the live market…"><button id="askbtn" class="btn primary">Analyze</button></div></section><aside class="card"><small>AGENT CONTEXT</small><p><b>Live:</b> current token state, liquidity, volume, flow, momentum and safety.</p><p><b>Reasoning:</b> separates early opportunities from established movers and risk cases.</p><p><b>Learning:</b> records rolling observations and 5-minute outcomes in process memory.</p><p><b>Next upgrade:</b> persistent database + real LLM reasoning + model calibration across historical outcomes.</p><div class="notice">The current agent is a deterministic market-analysis layer. It does not have hidden access to ChatGPT or a magical prediction model.</div></aside></div></section>
+<section id="agent" class="page"><div class="agent"><section class="card chat"><div><small class="muted">AI RESEARCH AGENT</small><h1 style="font-size:20px;margin:4px 0 10px">Ask about the market</h1><div id="chat"></div></div><div class="chips"><button class="chip" data-q="What are the strongest qualified setups right now?">Strongest setups</button><button class="chip" data-q="Which tokens look risky and why?">Risk check</button><button class="chip" data-q="What's your measured track record?">Track record</button></div><div class="inputrow"><input id="ask" placeholder="Ask a question about the live market…"><button id="askbtn" class="btn primary">Ask</button></div></section><aside class="card"><small class="muted">HOW IT ANSWERS</small><p style="font-size:13px">Reads live prices, liquidity, risk flags and the measured outcomes of past calls — never invents facts.</p><div class="notice">Not financial advice. Treat every answer as a research scenario, not a guarantee.</div></aside></div></section>
 
-<section id="wallet" class="page"><div class="two"><section class="card"><small>CONNECTED WALLET</small><h1 id="wa">Not connected</h1><p id="wn" class="muted">Connect Solflare to display your public address and SOL balance.</p><button id="disconnect" class="btn">Disconnect</button></section><section class="card"><small>SOL BALANCE</small><div id="bal" class="value">—</div><p class="muted">Read-only. No seed phrase or private key is requested.</p></section></div></section>
+<section id="wallet" class="page"><div class="two"><section class="card"><small class="muted">CONNECTED WALLET</small><h1 id="wa" style="font-size:19px">Not connected</h1><p id="wn" class="muted">Connect Solflare to view your address and balance.</p><button id="disconnect" class="btn">Disconnect</button></section><section class="card"><small class="muted">SOL BALANCE</small><div id="bal" class="value">—</div><p class="muted">Read-only — no keys requested.</p></section></div></section>
 </main>
 <script>
 (function(){
@@ -32,7 +112,32 @@
   const money=x=>{x=Number(x);if(!Number.isFinite(x))return"—";if(x>=1e9)return"$"+(x/1e9).toFixed(2)+"B";if(x>=1e6)return"$"+(x/1e6).toFixed(2)+"M";if(x>=1e3)return"$"+(x/1e3).toFixed(1)+"K";return x>=1?"$"+x.toFixed(2):x?"$"+x.toPrecision(4):"—"};
   const pct=x=>{x=Number(x);return Number.isFinite(x)?(x>=0?"+":"")+x.toFixed(1)+"%":"—"};
   const dex=t=>t?.pair?.url||("https://dexscreener.com/solana/"+encodeURIComponent(t?.pair?.pairAddress||""));
+
+  // Token avatar: real image if we have one, otherwise a colored initial badge. Images come
+  // from third-party launch metadata, so a broken/slow URL just falls back silently.
+  function avatar(t){
+    const initial=esc((t.symbol||t.name||"?").trim().charAt(0).toUpperCase()||"?");
+    if(t.metadataImage) return '<img class="avatar" src="'+esc(t.metadataImage)+'" loading="lazy" onerror="this.outerHTML=\'<div class=avatar-fallback>'+initial+'</div>\'">';
+    return '<div class="avatar-fallback">'+initial+'</div>';
+  }
+
+  // Small inline SVG sparkline from the token's recent price history (t.chart, provided by the
+  // server). No canvas bookkeeping needed since it's re-rendered as a string each draw.
+  function sparkline(chart, w, h){
+    w=w||64; h=h||22;
+    const pts=(chart||[]).filter(p=>Number.isFinite(p?.price)).slice(-30);
+    if(pts.length<2) return '<span class="muted" style="font-size:11px">—</span>';
+    const prices=pts.map(p=>p.price);
+    const lo=Math.min(...prices), hi=Math.max(...prices), span=(hi-lo)||1;
+    const step=w/(pts.length-1);
+    const coords=prices.map((p,i)=>[i*step,(h-2)-((p-lo)/span)*(h-4)]);
+    const d=coords.map((c,i)=>(i?"L":"M")+c[0].toFixed(1)+","+c[1].toFixed(1)).join(" ");
+    const up=prices[prices.length-1]>=prices[0];
+    return '<svg class="spark" width="'+w+'" height="'+h+'" viewBox="0 0 '+w+' '+h+'"><path d="'+d+'" fill="none" stroke="'+(up?"#4df2ad":"#ff6b83")+'" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/></svg>';
+  }
+
   function setStatus(s){if($("st"))$("st").textContent=s}
+
   function draw(){
     const needle=($("q")?.value||"").toLowerCase().trim();
     const all=[...M.values()];
@@ -41,49 +146,67 @@
       return !needle||[t.name,t.symbol,t.mint].some(v=>String(v||"").toLowerCase().includes(needle));
     }).sort((a,b)=>(b.signal?.score||0)-(a.signal?.score||0)).slice(0,100);
     if($("rows"))$("rows").innerHTML=z.length?z.map(t=>{
-      const p=t.pair||{},r=t.rug||{},s=t.signal||{},b=Number(p.txns?.h1?.buys||0),se=Number(p.txns?.h1?.sells||0),flow=b+se?Math.round(b/(b+se)*100):0;
-      const risk=r.rugged||Number(r.scoreNormalized)>=45?"risk":Number(r.scoreNormalized)>=30?"warn":"";
-      const sc=Number(s.score)>=72?"":Number(s.score)>=62?"warn":"risk";
-      return '<tr class="coin-row" data-dex="'+esc(dex(t))+'"><td><b>'+esc(t.name||"Metadata pending")+'</b><br><small>'+esc(t.symbol||"—")+' · '+esc(String(t.mint||"").slice(0,8))+'…</small></td><td><span class="badge '+(t.category==="RISK"?"risk":t.category==="EARLY"?"":"warn")+'">'+esc(t.category||"—")+'</span></td><td>'+money(p.priceUsd)+'</td><td class="'+(Number(p.priceChange?.m5)>=0?"green":"risk")+'">'+pct(p.priceChange?.m5)+'</td><td>'+pct(p.priceChange?.h1)+'</td><td>'+money(p.marketCap||p.fdv)+'</td><td>'+money(p.liquidity?.usd)+'</td><td>'+money(p.volume?.h1)+'</td><td>'+b+" / "+se+'<br><small>'+flow+'% buy</small></td><td><span class="badge '+risk+'">'+(r.scoreNormalized==null?"CHECK":Math.round(r.scoreNormalized))+'</span></td><td><span class="badge '+sc+'">'+(s.score??0)+' · '+esc(s.label||"")+'</span></td><td><span class="muted">live</span></td></tr>';
-    }).join(""):'<tr><td colspan="12" class="empty">Waiting for verified live market data…</td></tr>';
+      const p=t.pair||{},r=t.rug||{},s=t.signal||{};
+      const riskClass=r.rugged||Number(r.scoreNormalized)>=45?"risk":Number(r.scoreNormalized)>=30?"warn":"";
+      const scoreClass=Number(s.score)>=72?"":Number(s.score)>=62?"warn":"risk";
+      const catClass=t.category==="RISK"?"risk":t.category==="EARLY"?"":"warn";
+      return '<tr class="coin-row" data-dex="'+esc(dex(t))+'"><td><div class="token-cell">'+avatar(t)+'<div><div class="token-name">'+esc(t.name||"Metadata pending")+'</div><div class="token-sub">'+esc(t.symbol||"—")+' <span class="tag '+catClass+'">'+esc(t.category||"—")+'</span></div></div></div></td><td>'+money(p.priceUsd)+'</td><td class="'+(Number(p.priceChange?.m5)>=0?"pos":"neg")+'">'+pct(p.priceChange?.m5)+'</td><td class="'+(Number(p.priceChange?.h1)>=0?"pos":"neg")+'">'+pct(p.priceChange?.h1)+'</td><td>'+money(p.liquidity?.usd)+'</td><td><span class="badge '+riskClass+'">'+(r.scoreNormalized==null?"CHECK":Math.round(r.scoreNormalized))+'</span></td><td><span class="badge '+scoreClass+'">'+(s.score??0)+'</span></td><td>'+sparkline(t.chart)+'</td></tr>';
+    }).join(""):'<tr><td colspan="8" class="empty">Waiting for live market data…</td></tr>';
     $("n").textContent=all.length;
     $("r").textContent=all.filter(t=>t.rug&&(t.rug.rugged||Number(t.rug.scoreNormalized)>=45)).length;
     $("s").textContent=all.filter(t=>t.quality&&t.signal?.score>=72&&t.pair&&Number(t.pair.liquidity?.usd)>=10000).length;
-    $("e").textContent=all.filter(t=>t.category==="EARLY").length;
-    $("feed").innerHTML=z.slice(0,7).map(t=>'<div class="item"><b>'+esc(t.symbol||"—")+' · '+esc(t.category||"—")+'</b><br><small>'+Number(t.signal?.score||0)+'/100 · '+esc((t.signal?.reasons||[]).join(" · "))+'</small></div>').join("")||'<div class="empty">Waiting for verified opportunities.</div>';
+    $("feed").innerHTML=z.slice(0,8).map(t=>'<div class="item">'+avatar(t)+'<div><b>'+esc(t.symbol||"—")+'</b><br><small class="muted">'+Number(t.signal?.score||0)+'/100 · '+esc(t.category||"—")+'</small></div></div>').join("")||'<div class="empty">Waiting for data.</div>';
   }
+
   async function json(url){
     const r=await fetch(url,{cache:"no-store"});
     if(!r.ok)throw new Error(url+" HTTP "+r.status);
     return r.json();
   }
+
   async function load(){
     try{
       const d=await json("/api/tokens");
       if(Array.isArray(d))d.forEach(t=>t&&t.mint&&M.set(t.mint,t));
       draw();
-      const h=await json("/api/health");
-      $("l").textContent=h.learningSamples??0;
-      setStatus("LIVE · data "+M.size);
+      setStatus("LIVE · "+M.size+" tracked");
     }catch(e){
       setStatus("DATA ERROR");
       console.error("PumpScope load failed",e);
     }
   }
+
+  function perfPill(label,tf){
+    if(!tf||!tf.resolved) return '<div class="perf-pill"><div class="n">—</div><div class="lbl">'+label+'</div></div>';
+    return '<div class="perf-pill"><div class="n '+(tf.avgNetPct>=0?"pos":"neg")+'">'+tf.winRate+'% win</div><div class="lbl">'+label+' · '+tf.resolved+' calls · '+(tf.avgNetPct>=0?"+":"")+tf.avgNetPct+'% avg</div></div>';
+  }
+
+  async function loadPerformance(){
+    try{
+      const p=await json("/api/performance");
+      if(!p||!p.timeframes)return;
+      $("perfBox").style.display="";
+      $("perfRow").innerHTML=perfPill("5 min",p.timeframes["5m"])+perfPill("15 min",p.timeframes["15m"])+perfPill("1 hour",p.timeframes["1h"]);
+    }catch(e){console.error("performance failed",e)}
+  }
+
   async function loadCalls(){
     const box=$("callsGrid");
+    loadPerformance();
     try{
       const c=await json("/api/calls");
       box.innerHTML=Array.isArray(c)&&c.length?c.map(t=>{
         const p=t.tradePlan||{},ex=p.exits||[];
-        return '<div class="call"><small>'+esc(t.callType||"QUALIFIED")+'</small><div class="title">'+esc(t.name||"—")+' · '+esc(t.symbol||"—")+'</div><div class="score">'+Number(t.signal?.score||0)+'/100</div><p>'+money(t.pair?.marketCap||t.pair?.fdv)+' MC · '+money(t.pair?.liquidity?.usd)+' liq · '+money(t.pair?.volume?.h1)+' 1h vol</p><p class="muted">'+esc((t.signal?.reasons||[]).join(" · "))+'</p><div class="statline"><span>Entry</span><b>'+(p.eligible?money(p.entry?.low)+" – "+money(p.entry?.high):"NO ENTRY")+'</b></div><div class="statline"><span>Invalidation</span><b>'+(p.invalidation?money(p.invalidation.price)+" ("+p.invalidation.percent+"%)":"—")+'</b></div><div class="statline"><span>Profit ladder</span><b>'+ex.slice(0,4).map(x=>"+"+((Number(x.multiple)-1)*100).toFixed(0)+"%: "+x.sellPct+"%").join(" · ")+'</b></div><div class="statline"><span>Runner</span><b>'+(p.runner?.pct||0)+'%</b></div><p class="muted">MC ladder: '+ex.slice(0,4).map(x=>money(x.mc)).join(" → ")+'</p><a target="_blank" rel="noopener" href="'+esc(dex(t))+'">Open market →</a></div>';
-      }).join(""):'<div class="card empty">No qualified opportunities right now. The scanner is intentionally allowed to make no call when gates are not met.</div>';
-    }catch(e){console.error("calls failed",e);box.innerHTML='<div class="card empty">Qualified data is temporarily unavailable. Refreshing automatically…</div>'}
+        return '<div class="call"><div class="call-head">'+avatar(t)+'<div><div class="title">'+esc(t.name||"—")+' · '+esc(t.symbol||"—")+'</div><small class="muted">'+esc(t.callType||"QUALIFIED")+'</small></div></div><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><div class="score">'+Number(t.signal?.score||0)+'/100</div>'+sparkline(t.chart,90,28)+'</div><p class="muted" style="font-size:12.5px;margin:0 0 8px">'+money(t.pair?.marketCap||t.pair?.fdv)+' MC · '+money(t.pair?.liquidity?.usd)+' liq</p><div class="statline"><span>Entry</span><b>'+(p.eligible?money(p.entry?.low)+" – "+money(p.entry?.high):"NO ENTRY")+'</b></div><div class="statline"><span>Invalidation</span><b>'+(p.invalidation?money(p.invalidation.price):"—")+'</b></div><div class="statline"><span>Profit ladder</span><b>'+ex.slice(0,3).map(x=>"+"+((Number(x.multiple)-1)*100).toFixed(0)+"%").join(" · ")+'</b></div><a target="_blank" rel="noopener" href="'+esc(dex(t))+'" style="display:block;margin-top:8px">Open market →</a></div>';
+      }).join(""):'<div class="card empty">No qualified opportunities right now — the scanner is intentionally allowed to make no call when gates aren\'t met.</div>';
+    }catch(e){console.error("calls failed",e);box.innerHTML='<div class="card empty">Qualified data temporarily unavailable. Refreshing automatically…</div>'}
   }
+
   function loadRisk(){
     const z=[...M.values()].filter(t=>t.rug&&(t.rug.rugged||Number(t.rug.scoreNormalized)>=30)).sort((a,b)=>(b.rug?.scoreNormalized||0)-(a.rug?.scoreNormalized||0)).slice(0,30);
-    $("riskGrid").innerHTML=z.map(t=>'<div class="call"><small>'+esc(t.category||"RISK")+'</small><div class="title">'+esc(t.name||"—")+' · '+esc(t.symbol||"—")+'</div><div class="score" style="color:var(--red)">'+Math.round(t.rug.scoreNormalized||0)+'</div><p>'+esc((t.signal?.reasons||[]).join(" · "))+'</p><a target="_blank" rel="noopener" href="https://rugcheck.xyz/tokens/'+encodeURIComponent(t.mint)+'">Open RugCheck →</a></div>').join("")||'<div class="card empty">No elevated-risk tokens currently enriched.</div>';
+    $("riskGrid").innerHTML=z.map(t=>'<div class="call"><div class="call-head">'+avatar(t)+'<div><div class="title">'+esc(t.name||"—")+' · '+esc(t.symbol||"—")+'</div><small class="muted">'+esc(t.category||"RISK")+'</small></div></div><div class="score neg">'+Math.round(t.rug.scoreNormalized||0)+'</div><p class="muted" style="font-size:12.5px">'+esc((t.signal?.reasons||[]).join(" · "))+'</p><a target="_blank" rel="noopener" href="https://rugcheck.xyz/tokens/'+encodeURIComponent(t.mint)+'">Open RugCheck →</a></div>').join("")||'<div class="card empty">No elevated-risk tokens currently tracked.</div>';
   }
+
   document.addEventListener("click",e=>{
     const nav=e.target.closest(".nav button");
     if(nav){
@@ -100,15 +223,17 @@
     const chip=e.target.closest(".chip");
     if(chip){$("ask").value=chip.dataset.q||"";ask()}
   });
+
   async function ask(){
     const input=$("ask"),question=input.value.trim();if(!question)return;
     const chat=$("chat");chat.innerHTML+='<div class="msg user">'+esc(question)+'</div>';input.value="";
-    try{const d=await json("/api/agent?q="+encodeURIComponent(question));chat.innerHTML+='<div class="msg"><b>Agent</b><br>'+esc(d.answer||"No answer returned.")+'<br><br><small>Tracked '+(d.market?.tracked??0)+' · qualified '+(d.market?.candidates??0)+' · risk '+(d.market?.riskFlags??0)+' · learning samples '+(d.market?.learningSamples??0)+'</small></div>'}
+    try{const d=await json("/api/agent?q="+encodeURIComponent(question));chat.innerHTML+='<div class="msg">'+esc(d.answer||"No answer returned.")+'</div>'}
     catch(e){console.error(e);chat.innerHTML+='<div class="msg">Agent connection failed. The live scanner is still running.</div>'}
     chat.scrollTop=chat.scrollHeight;
   }
   $("askbtn").onclick=ask;
   $("ask").onkeydown=e=>{if(e.key==="Enter")ask()};
+
   let ev=null,retry=null;
   function connectStream(){
     if(ev)try{ev.close()}catch{}
@@ -117,13 +242,15 @@
     ev.onerror=()=>{setStatus("Reconnecting…");clearTimeout(retry);retry=setTimeout(connectStream,3000)};
     ["snapshot","token","update"].forEach(k=>ev.addEventListener(k,e=>{try{const d=JSON.parse(e.data);(k==="snapshot"?d:[d]).forEach(t=>t&&t.mint&&M.set(t.mint,t));draw()}catch(err){console.error("stream event",err)}}));
   }
+
   let wallet=null;
   async function connectWallet(){
     try{if(!window.solflare){alert("Install Solflare or open PumpScope inside Solflare.");return}await window.solflare.connect();wallet=window.solflare.publicKey?.toString();if(wallet){$("wa").textContent=wallet.slice(0,7)+"…"+wallet.slice(-7);$("wn").textContent=wallet;const d=await json("/api/wallet?address="+encodeURIComponent(wallet));if(!d.error)$("bal").textContent=Number(d.balanceSol).toFixed(4)+" SOL"}}catch(e){console.error(e)}
   }
   $("connect").onclick=connectWallet;
-  $("disconnect").onclick=()=>{try{window.solflare?.disconnect()}catch{}wallet=null;$("wa").textContent="Not connected";$("wn").textContent="Connect Solflare to display your public address and SOL balance.";$("bal").textContent="—"};
+  $("disconnect").onclick=()=>{try{window.solflare?.disconnect()}catch{}wallet=null;$("wa").textContent="Not connected";$("wn").textContent="Connect Solflare to view your address and balance.";$("bal").textContent="—"};
   $("q").oninput=draw;
+
   connectStream();
   load();
   loadCalls();
