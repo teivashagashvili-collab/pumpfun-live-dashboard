@@ -79,7 +79,7 @@ th.tip:hover::after{top:150%}
 @media(max-width:700px){.app{padding:10px}.kpis,.grid{grid-template-columns:1fr 1fr}.brand{font-size:19px}.wallet{margin-left:0}}
 </style></head><body><main class="app">
 <header class="top"><div><div class="brand">PumpScope <b>Live</b></div><div class="muted" style="font-size:12px">Memecoin radar · safety gates · research agent</div></div><input id="q" class="search" placeholder="Search name, ticker or mint"><button id="connect" class="btn primary wallet">Track Wallet</button><span id="live" class="tag">● LIVE</span></header>
-<nav class="nav"><button class="active" data-page="radar">Radar</button><button data-page="calls">Qualified</button><button data-page="history">History</button><button data-page="risk">Risk</button><button data-page="market">How it works</button><button data-page="agent">AI Agent</button><button data-page="wallet">Wallet</button></nav>
+<nav class="nav"><button class="active" data-page="radar">Radar</button><button data-page="calls">Qualified</button><button data-page="history">History</button><button data-page="risk">Risk</button><button data-page="market">How it works</button><button data-page="agent">AI Agent</button><button data-page="wallet">Wallet</button><button data-page="autobot">Autobot</button></nav>
 
 <section id="radar" class="page active">
 <div class="kpis"><div class="card"><div class="kpi-label tip" data-tip="How many pump.fun tokens this page is currently watching live.">Tracked</div><div id="n" class="value">0</div></div><div id="qCard" class="card" style="cursor:pointer" title="Click to show only qualified coins"><div class="kpi-label tip" data-tip="Tokens that passed every safety and liquidity check we run. Click this card to see just these.">Qualified</div><div id="s" class="value pos">0</div></div><div class="card"><div class="kpi-label tip" data-tip="Tokens currently flagged as risky — Caution or Danger on the safety badge.">Risk flags</div><div id="r" class="value neg">0</div></div><div class="card"><div class="kpi-label">Stream</div><div id="st" class="value" style="font-size:15px">Connecting…</div></div></div>
@@ -132,6 +132,32 @@ th.tip:hover::after{top:150%}
     <div class="scroll"><table><thead><tr><th>Token</th><th>Amount</th><th>Price</th><th>Value</th><th>Your entry</th><th>Position</th><th>Safety</th><th>Score</th></tr></thead><tbody id="walletRows"></tbody></table></div>
     <p id="walletTruncNote" class="muted" style="display:none;margin-top:6px">Showing the top holdings by value; smaller dust balances are hidden.</p>
   </section>
+</section>
+
+<section id="autobot" class="page">
+  <div class="hero"><small class="muted">AUTONOMOUS TRADING — REAL FUNDS</small><h1>Autobot</h1><p>When configured and turned on, this trades a dedicated wallet on its own — no per-trade approval — using the same score/safety gates as the rest of the site, plus a stricter score bar. It only buys and sells qualified candidates and always applies the invalidation level and profit-taking ladder it would show a human. It only trades tokens with a real Jupiter-routable market, which naturally excludes the very freshest bonding-curve-only tokens.</p></div>
+  <div id="autobotNotConfigured" class="notice" style="display:none">Not configured yet. This requires <code>AUTOTRADE_PRIVATE_KEY</code> (a dedicated trading wallet's key, set as a Railway sealed variable — never paste a private key into this dashboard or into chat) and <code>AUTOTRADE_ENABLED=true</code>. Until then it stays fully off.</div>
+  <div class="kpis">
+    <div class="card"><div class="kpi-label">Status</div><div id="abStatus" class="value" style="font-size:16px">—</div></div>
+    <div class="card"><div class="kpi-label">Wallet balance</div><div id="abBalance" class="value" style="font-size:16px">—</div></div>
+    <div class="card"><div class="kpi-label tip" data-tip="Realized profit/loss from closed positions today (UTC). New buys pause for the rest of the day once this hits the configured cap.">Today's P&L</div><div id="abPnl" class="value" style="font-size:16px">—</div></div>
+    <div class="card"><div class="kpi-label">Open positions</div><div id="abOpenCount" class="value" style="font-size:16px">—</div></div>
+  </div>
+  <section class="card" style="margin-bottom:12px">
+    <small class="muted">WALLET</small>
+    <p id="abWalletAddr" class="muted" style="word-break:break-all;margin:4px 0">—</p>
+    <small class="muted">KILL SWITCH</small>
+    <p class="muted" style="font-size:12px;margin:4px 0 10px">Halting stops new buys immediately but keeps managing (and can still stop-loss/take-profit) any position already open. Liquidating force-sells every open position right now, regardless of price.</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <input id="abAdminToken" class="search" style="flex:1;min-width:200px;max-width:300px" type="password" placeholder="Admin token (AUTOTRADE_ADMIN_TOKEN)">
+      <button id="abHaltBtn" class="btn">Halt new buys</button>
+      <button id="abResumeBtn" class="btn">Resume</button>
+      <button id="abLiquidateBtn" class="btn" style="border-color:var(--red);color:var(--red)">Liquidate everything now</button>
+    </div>
+    <p id="abAdminMsg" class="muted" style="margin-top:8px;font-size:12.5px"></p>
+  </section>
+  <section class="box" style="margin-bottom:12px"><div class="head">Open positions</div><div class="scroll"><table><thead><tr><th>Token</th><th>Opened</th><th>SOL spent</th><th>Entry price</th><th>Current price</th><th>Change</th><th>Invalidation</th></tr></thead><tbody id="abPositionRows"><tr><td colspan="7" class="empty">No open positions.</td></tr></tbody></table></div></section>
+  <section class="box"><div class="head">Recent trades</div><div class="scroll"><table><thead><tr><th>When</th><th>Token</th><th>Side</th><th>SOL</th><th>Price</th><th>Reason</th><th>Tx</th></tr></thead><tbody id="abTradeRows"><tr><td colspan="7" class="empty">No trades yet.</td></tr></tbody></table></div></section>
 </section>
 </main>
 <script>
@@ -344,6 +370,7 @@ th.tip:hover::after{top:150%}
       if(nav.dataset.page==="calls")loadCalls();
       if(nav.dataset.page==="risk")loadRisk();
       if(nav.dataset.page==="history")loadHistory();
+      if(nav.dataset.page==="autobot")loadAutobot();
       return;
     }
     const row=e.target.closest("tr.coin-row");
@@ -459,10 +486,62 @@ th.tip:hover::after{top:150%}
 
   $("q").oninput=draw;
 
+  // ---- Autobot: real-funds autonomous trading status + kill switch. The admin token is kept in
+  // sessionStorage only (cleared when the tab closes) — this dashboard never stores or has access
+  // to the trading wallet's private key itself, only the separate admin token used to halt it.
+  function getAdminToken(){try{return sessionStorage.getItem("pumpscope_ab_token")||""}catch{return ""}}
+  function setAdminToken(v){try{v?sessionStorage.setItem("pumpscope_ab_token",v):sessionStorage.removeItem("pumpscope_ab_token")}catch{}}
+
+  function renderAutobot(d){
+    $("autobotNotConfigured").style.display=d.configured?"none":"";
+    $("abStatus").textContent=!d.configured?"Not configured":d.live?(d.halted?"HALTED":"LIVE — trading autonomously"):"Configured, not enabled";
+    $("abStatus").className="value "+(!d.configured?"":d.live&&!d.halted?"pos":"neg");
+    $("abBalance").textContent=d.solBalance!=null?Number(d.solBalance).toFixed(4)+" SOL":"—";
+    $("abPnl").textContent=d.realizedPnlTodaySol!=null?(d.realizedPnlTodaySol>=0?"+":"")+Number(d.realizedPnlTodaySol).toFixed(4)+" / -"+d.dailyLossCapSol+" SOL cap":"—";
+    $("abPnl").className="value "+(d.realizedPnlTodaySol>0?"pos":d.realizedPnlTodaySol<0?"neg":"");
+    $("abOpenCount").textContent=(d.openPositions||[]).length+" / "+d.maxConcurrentPositions;
+    $("abWalletAddr").textContent=d.walletAddress||"Not configured — set AUTOTRADE_PRIVATE_KEY as a Railway sealed variable";
+    const pos=d.openPositions||[];
+    $("abPositionRows").innerHTML=pos.length?pos.map(p=>{
+      const chg=p.unrealizedChangePct;
+      return '<tr><td>'+esc(p.symbol||p.mint.slice(0,6))+'</td><td>'+new Date(p.openedAt).toLocaleTimeString()+'</td><td>'+Number(p.solSpent).toFixed(4)+'</td><td>'+money(p.entryPriceUsd)+'</td><td>'+money(p.currentPriceUsd)+'</td><td class="'+(chg>=0?"pos":"neg")+'">'+(chg==null?"—":pct(chg))+'</td><td>'+money(p.invalidationPriceUsd)+'</td></tr>';
+    }).join(""):'<tr><td colspan="7" class="empty">No open positions.</td></tr>';
+    const tr=d.recentTrades||[];
+    $("abTradeRows").innerHTML=tr.length?tr.map(x=>{
+      const sig=x.tx_signature?'<a href="https://solscan.io/tx/'+encodeURIComponent(x.tx_signature)+'" target="_blank" rel="noopener">view →</a>':"—";
+      return '<tr><td>'+new Date(x.ts).toLocaleString()+'</td><td>'+esc(x.symbol||x.mint.slice(0,6))+'</td><td class="'+(x.side==="buy"?"pos":"neg")+'">'+esc(x.side)+'</td><td>'+Number(x.sol_amount).toFixed(4)+'</td><td>'+money(x.price_usd)+'</td><td style="font-size:11.5px">'+esc(x.reason||"—")+'</td><td>'+sig+'</td></tr>';
+    }).join(""):'<tr><td colspan="7" class="empty">No trades yet.</td></tr>';
+  }
+
+  async function loadAutobot(){
+    try{ renderAutobot(await json("/api/autotrade/status")); }
+    catch(e){ console.error(e); }
+  }
+
+  async function autobotAdminAction(path,confirmMsg){
+    const token=($("abAdminToken").value||getAdminToken()).trim();
+    if(!token){$("abAdminMsg").textContent="Enter the admin token first.";return}
+    if(confirmMsg&&!confirm(confirmMsg))return;
+    setAdminToken(token);
+    $("abAdminMsg").textContent="Working…";
+    try{
+      const r=await fetch(path,{method:"POST",headers:{"x-autotrade-admin-token":token}});
+      const d=await r.json();
+      if(!r.ok){$("abAdminMsg").textContent=d.error||"Failed — check the admin token.";return}
+      $("abAdminMsg").textContent="Done.";
+      loadAutobot();
+    }catch(e){console.error(e);$("abAdminMsg").textContent="Request failed.";}
+  }
+  $("abAdminToken").value=getAdminToken();
+  $("abHaltBtn").onclick=()=>autobotAdminAction("/api/autotrade/halt");
+  $("abResumeBtn").onclick=()=>autobotAdminAction("/api/autotrade/resume");
+  $("abLiquidateBtn").onclick=()=>autobotAdminAction("/api/autotrade/liquidate-all","Force-sell every open autobot position right now, at whatever price is available? This can't be undone.");
+
   connectStream();
   load();
   loadCalls();
   setInterval(load,4000);
   setInterval(()=>{if($("calls").classList.contains("active"))loadCalls()},8000);
+  setInterval(()=>{if($("autobot").classList.contains("active"))loadAutobot()},10000);
 })();
 </script></body></html>
