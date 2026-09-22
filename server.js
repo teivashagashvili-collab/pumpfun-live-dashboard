@@ -180,7 +180,9 @@ async function sendTelegramAlert(t) {
   const p = t.pair || {};
   const url = p.url || ("https://dexscreener.com/solana/" + encodeURIComponent(p.pairAddress || ""));
   const callType = t.signal.score >= 82 ? "A-TIER WATCH" : t.signal.score >= 74 ? "QUALIFIED WATCH" : "MOMENTUM WATCH";
-  const text = "🎯 " + callType + ": " + t.name + " (" + t.symbol + ")\n" +
+  // Name/symbol are untrusted third-party pump.fun metadata — capped so a hostile/garbage value
+  // can't blow past Telegram's 4096-char message limit and silently drop the alert.
+  const text = "🎯 " + callType + ": " + sanitizeForPrompt(t.name, 80) + " (" + sanitizeForPrompt(t.symbol, 20) + ")\n" +
     "Score: " + t.signal.score + "/100 · Risk: " + Math.round(t.rug?.scoreNormalized || 0) + "\n" +
     "MC: " + usd(p.marketCap || p.fdv) + " · Liq: " + usd(p.liquidity?.usd) + "\n" +
     "Research only, not financial advice.\n" + url;
