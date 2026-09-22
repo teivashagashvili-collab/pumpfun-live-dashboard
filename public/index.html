@@ -40,6 +40,7 @@ tr:hover{background:#0d211b}
 .badge{display:inline-block;padding:4px 8px;border-radius:999px;background:#4df2ad18;color:var(--green);font-weight:800;font-size:11px;white-space:nowrap}
 .badge.risk{background:#ff6b8318;color:var(--red)}
 .badge.warn{background:#ffd16618;color:var(--amber)}
+.badge.off{background:#0e211b;color:var(--muted)}
 .blue{color:var(--blue)}
 .pos{color:var(--green)}.neg{color:var(--red)}
 a{color:var(--green);text-decoration:none}
@@ -135,29 +136,50 @@ th.tip:hover::after{top:150%}
 </section>
 
 <section id="autobot" class="page">
-  <div class="hero"><small class="muted">AUTONOMOUS TRADING — REAL FUNDS</small><h1>Autobot</h1><p>When configured and turned on, this trades a dedicated wallet on its own — no per-trade approval — using the same score/safety gates as the rest of the site, plus a stricter score bar. It only buys and sells qualified candidates and always applies the invalidation level and profit-taking ladder it would show a human. It only trades tokens with a real Jupiter-routable market, which naturally excludes the very freshest bonding-curve-only tokens.</p></div>
-  <div id="autobotNotConfigured" class="notice" style="display:none">Not configured yet. This requires <code>AUTOTRADE_PRIVATE_KEY</code> (a dedicated trading wallet's key, set as a Railway sealed variable — never paste a private key into this dashboard or into chat) and <code>AUTOTRADE_ENABLED=true</code>. Until then it stays fully off.</div>
-  <div class="kpis">
-    <div class="card"><div class="kpi-label">Status</div><div id="abStatus" class="value" style="font-size:16px">—</div></div>
-    <div class="card"><div class="kpi-label">Wallet balance</div><div id="abBalance" class="value" style="font-size:16px">—</div></div>
-    <div class="card"><div class="kpi-label tip" data-tip="Realized profit/loss from closed positions today (UTC). New buys pause for the rest of the day once this hits the configured cap.">Today's P&L</div><div id="abPnl" class="value" style="font-size:16px">—</div></div>
-    <div class="card"><div class="kpi-label">Open positions</div><div id="abOpenCount" class="value" style="font-size:16px">—</div></div>
+  <div class="hero"><small class="muted">AUTONOMOUS TRADING — REAL FUNDS</small><h1>Autobot</h1><p>In plain terms: once it's turned on, this buys and sells for you automatically, using real money, without asking first each time. It only touches coins that already pass every safety check on this site, and before it ever buys anything it already knows the exact price where it will sell to cut a loss.</p></div>
+
+  <div id="autobotSetup" class="card" style="margin-bottom:12px;display:none;border-color:var(--amber)">
+    <small class="muted" style="color:var(--amber)">GET STARTED — 3 STEPS</small>
+    <h1 style="font-size:17px;margin:6px 0 12px">Turn the bot on</h1>
+    <div class="statline"><span>1. Make a new wallet</span><b>Use Phantom or Solflare — don't reuse your main wallet</b></div>
+    <div class="statline"><span>2. Give it the key, safely</span><b>Railway → Variables → AUTOTRADE_PRIVATE_KEY, marked sealed — never paste a private key into this dashboard or into chat</b></div>
+    <div class="statline"><span>3. Set a password &amp; switch it on</span><b>Add AUTOTRADE_ADMIN_TOKEN (your emergency password) and set AUTOTRADE_ENABLED=true</b></div>
+    <p class="muted" style="font-size:12px;margin-top:10px">Only put money in the new wallet that you're fully OK losing — once it's on, it trades by itself with no approval per trade.</p>
   </div>
+
+  <div class="kpis">
+    <div class="card"><div class="kpi-label tip" data-tip="Whether the bot is actually buying and selling right now, paused, or hasn't been set up yet.">Status</div><div id="abStatus" style="margin-top:7px">—</div></div>
+    <div class="card"><div class="kpi-label tip" data-tip="How much money is sitting in the bot's own separate wallet right now — never your main tracked wallet.">Wallet balance</div><div id="abBalance" class="value" style="font-size:16px">—</div></div>
+    <div class="card"><div class="kpi-label tip" data-tip="Profit or loss from trades the bot has already finished today. It stops opening new positions for the rest of the day once this hits the loss limit — but keeps managing (and can still sell) anything already open either way.">Today's result</div><div id="abPnl" class="value" style="font-size:16px">—</div></div>
+    <div class="card"><div class="kpi-label tip" data-tip="How many different coins the bot currently owns, out of the most it's allowed to hold at once.">Currently holding</div><div id="abOpenCount" class="value" style="font-size:16px">—</div></div>
+  </div>
+
   <section class="card" style="margin-bottom:12px">
-    <small class="muted">WALLET</small>
-    <p id="abWalletAddr" class="muted" style="word-break:break-all;margin:4px 0">—</p>
-    <small class="muted">KILL SWITCH</small>
-    <p class="muted" style="font-size:12px;margin:4px 0 10px">Halting stops new buys immediately but keeps managing (and can still stop-loss/take-profit) any position already open. Liquidating force-sells every open position right now, regardless of price.</p>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <input id="abAdminToken" class="search" style="flex:1;min-width:200px;max-width:300px" type="password" placeholder="Admin token (AUTOTRADE_ADMIN_TOKEN)">
-      <button id="abHaltBtn" class="btn">Halt new buys</button>
-      <button id="abResumeBtn" class="btn">Resume</button>
-      <button id="abLiquidateBtn" class="btn" style="border-color:var(--red);color:var(--red)">Liquidate everything now</button>
+    <small class="muted">THE BOT'S WALLET</small>
+    <p id="abWalletAddr" class="muted" style="word-break:break-all;margin:4px 0 16px">Not set up yet.</p>
+    <small class="muted">EMERGENCY CONTROLS</small>
+    <p class="muted" style="font-size:12.5px;margin:4px 0 12px">These work instantly, any time — no waiting for anything to redeploy. You'll need the password you set as AUTOTRADE_ADMIN_TOKEN in Railway.</p>
+    <input id="abAdminToken" class="search" style="width:100%;max-width:340px;margin-bottom:12px" type="password" placeholder="Emergency password">
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <div style="flex:1;min-width:180px">
+        <button id="abHaltBtn" class="btn" style="width:100%">Pause buying</button>
+        <p class="muted" style="font-size:11.5px;margin:6px 0 0">Stops it from opening any new positions. It keeps watching anything already open and can still sell to cut a loss or take profit.</p>
+      </div>
+      <div style="flex:1;min-width:180px">
+        <button id="abResumeBtn" class="btn" style="width:100%">Resume</button>
+        <p class="muted" style="font-size:11.5px;margin:6px 0 0">Goes back to buying qualified coins on its own.</p>
+      </div>
+      <div style="flex:1;min-width:180px">
+        <button id="abLiquidateBtn" class="btn" style="width:100%;border-color:var(--red);color:var(--red)">Sell everything now</button>
+        <p class="muted" style="font-size:11.5px;margin:6px 0 0">Immediately sells every coin it's holding, at whatever price is available. Can't be undone.</p>
+      </div>
     </div>
-    <p id="abAdminMsg" class="muted" style="margin-top:8px;font-size:12.5px"></p>
+    <p id="abAdminMsg" class="muted" style="margin-top:10px;font-size:12.5px"></p>
   </section>
-  <section class="box" style="margin-bottom:12px"><div class="head">Open positions</div><div class="scroll"><table><thead><tr><th>Token</th><th>Opened</th><th>SOL spent</th><th>Entry price</th><th>Current price</th><th>Change</th><th>Invalidation</th></tr></thead><tbody id="abPositionRows"><tr><td colspan="7" class="empty">No open positions.</td></tr></tbody></table></div></section>
-  <section class="box"><div class="head">Recent trades</div><div class="scroll"><table><thead><tr><th>When</th><th>Token</th><th>Side</th><th>SOL</th><th>Price</th><th>Reason</th><th>Tx</th></tr></thead><tbody id="abTradeRows"><tr><td colspan="7" class="empty">No trades yet.</td></tr></tbody></table></div></section>
+
+  <section class="box" style="margin-bottom:12px"><div class="head">What it's holding right now</div><div class="scroll"><table><thead><tr><th>Coin</th><th>Bought</th><th class="tip" data-tip="How much SOL the bot spent buying this position.">Money in</th><th class="tip" data-tip="The price per coin at the moment the bot bought it.">Price then</th><th>Price now</th><th>Change</th><th class="tip" data-tip="If the price drops to this level, the bot automatically sells to limit the loss — decided before it ever bought.">Auto-sells at</th></tr></thead><tbody id="abPositionRows"><tr><td colspan="7" class="empty">Nothing yet — the bot hasn't bought anything.</td></tr></tbody></table></div></section>
+
+  <section class="box"><div class="head">Everything it's done</div><div class="scroll"><table><thead><tr><th>When</th><th>Coin</th><th>What happened</th><th>SOL</th><th>Price</th><th>Why</th><th>Proof</th></tr></thead><tbody id="abTradeRows"><tr><td colspan="7" class="empty">No trades yet — this fills in automatically the moment it buys or sells something.</td></tr></tbody></table></div></section>
 </section>
 </main>
 <script>
@@ -492,25 +514,33 @@ th.tip:hover::after{top:150%}
   function getAdminToken(){try{return sessionStorage.getItem("pumpscope_ab_token")||""}catch{return ""}}
   function setAdminToken(v){try{v?sessionStorage.setItem("pumpscope_ab_token",v):sessionStorage.removeItem("pumpscope_ab_token")}catch{}}
 
+  // Plain-word status instead of raw config flags — same traffic-light idea as safetyBadge().
+  function abStatusInfo(d){
+    if(!d.configured)return{text:"Not set up",cls:"off",sub:"Follow the 3 steps below to turn it on."};
+    if(!d.live)return{text:"Off",cls:"off",sub:"Wallet is ready, but AUTOTRADE_ENABLED isn't turned on yet."};
+    if(d.halted)return{text:"Paused",cls:"warn",sub:"Not buying anything new. Still watching what it already owns."};
+    return{text:"Live",cls:"",sub:"Actively buying and selling on its own, right now."};
+  }
+
   function renderAutobot(d){
-    $("autobotNotConfigured").style.display=d.configured?"none":"";
-    $("abStatus").textContent=!d.configured?"Not configured":d.live?(d.halted?"HALTED":"LIVE — trading autonomously"):"Configured, not enabled";
-    $("abStatus").className="value "+(!d.configured?"":d.live&&!d.halted?"pos":"neg");
+    $("autobotSetup").style.display=d.configured?"none":"";
+    const st=abStatusInfo(d);
+    $("abStatus").innerHTML='<span class="badge '+st.cls+'">'+esc(st.text)+'</span><div class="muted" style="font-size:11.5px;margin-top:6px">'+esc(st.sub)+'</div>';
     $("abBalance").textContent=d.solBalance!=null?Number(d.solBalance).toFixed(4)+" SOL":"—";
-    $("abPnl").textContent=d.realizedPnlTodaySol!=null?(d.realizedPnlTodaySol>=0?"+":"")+Number(d.realizedPnlTodaySol).toFixed(4)+" / -"+d.dailyLossCapSol+" SOL cap":"—";
+    $("abPnl").textContent=d.realizedPnlTodaySol!=null?(d.realizedPnlTodaySol>=0?"+":"")+Number(d.realizedPnlTodaySol).toFixed(4)+" SOL (limit: -"+d.dailyLossCapSol+")":"—";
     $("abPnl").className="value "+(d.realizedPnlTodaySol>0?"pos":d.realizedPnlTodaySol<0?"neg":"");
-    $("abOpenCount").textContent=(d.openPositions||[]).length+" / "+d.maxConcurrentPositions;
-    $("abWalletAddr").textContent=d.walletAddress||"Not configured — set AUTOTRADE_PRIVATE_KEY as a Railway sealed variable";
+    $("abOpenCount").textContent=(d.openPositions||[]).length+" of "+d.maxConcurrentPositions+" max";
+    $("abWalletAddr").textContent=d.walletAddress||"Not set up yet.";
     const pos=d.openPositions||[];
     $("abPositionRows").innerHTML=pos.length?pos.map(p=>{
       const chg=p.unrealizedChangePct;
-      return '<tr><td>'+esc(p.symbol||p.mint.slice(0,6))+'</td><td>'+new Date(p.openedAt).toLocaleTimeString()+'</td><td>'+Number(p.solSpent).toFixed(4)+'</td><td>'+money(p.entryPriceUsd)+'</td><td>'+money(p.currentPriceUsd)+'</td><td class="'+(chg>=0?"pos":"neg")+'">'+(chg==null?"—":pct(chg))+'</td><td>'+money(p.invalidationPriceUsd)+'</td></tr>';
-    }).join(""):'<tr><td colspan="7" class="empty">No open positions.</td></tr>';
+      return '<tr><td>'+esc(p.symbol||p.mint.slice(0,6))+'</td><td>'+new Date(p.openedAt).toLocaleTimeString()+'</td><td>'+Number(p.solSpent).toFixed(4)+' SOL</td><td>'+money(p.entryPriceUsd)+'</td><td>'+money(p.currentPriceUsd)+'</td><td class="'+(chg>=0?"pos":"neg")+'">'+(chg==null?"—":pct(chg))+'</td><td>'+money(p.invalidationPriceUsd)+'</td></tr>';
+    }).join(""):'<tr><td colspan="7" class="empty">Nothing yet — the bot hasn\'t bought anything.</td></tr>';
     const tr=d.recentTrades||[];
     $("abTradeRows").innerHTML=tr.length?tr.map(x=>{
-      const sig=x.tx_signature?'<a href="https://solscan.io/tx/'+encodeURIComponent(x.tx_signature)+'" target="_blank" rel="noopener">view →</a>':"—";
-      return '<tr><td>'+new Date(x.ts).toLocaleString()+'</td><td>'+esc(x.symbol||x.mint.slice(0,6))+'</td><td class="'+(x.side==="buy"?"pos":"neg")+'">'+esc(x.side)+'</td><td>'+Number(x.sol_amount).toFixed(4)+'</td><td>'+money(x.price_usd)+'</td><td style="font-size:11.5px">'+esc(x.reason||"—")+'</td><td>'+sig+'</td></tr>';
-    }).join(""):'<tr><td colspan="7" class="empty">No trades yet.</td></tr>';
+      const sig=x.tx_signature?'<a href="https://solscan.io/tx/'+encodeURIComponent(x.tx_signature)+'" target="_blank" rel="noopener">View proof →</a>':"—";
+      return '<tr><td>'+new Date(x.ts).toLocaleString()+'</td><td>'+esc(x.symbol||x.mint.slice(0,6))+'</td><td class="'+(x.side==="buy"?"pos":"neg")+'">'+(x.side==="buy"?"Bought":"Sold")+'</td><td>'+Number(x.sol_amount).toFixed(4)+'</td><td>'+money(x.price_usd)+'</td><td style="font-size:11.5px">'+esc(x.reason||"—")+'</td><td>'+sig+'</td></tr>';
+    }).join(""):'<tr><td colspan="7" class="empty">No trades yet — this fills in automatically the moment it buys or sells something.</td></tr>';
   }
 
   async function loadAutobot(){
@@ -520,22 +550,22 @@ th.tip:hover::after{top:150%}
 
   async function autobotAdminAction(path,confirmMsg){
     const token=($("abAdminToken").value||getAdminToken()).trim();
-    if(!token){$("abAdminMsg").textContent="Enter the admin token first.";return}
+    if(!token){$("abAdminMsg").textContent="Enter the emergency password first.";return}
     if(confirmMsg&&!confirm(confirmMsg))return;
     setAdminToken(token);
     $("abAdminMsg").textContent="Working…";
     try{
       const r=await fetch(path,{method:"POST",headers:{"x-autotrade-admin-token":token}});
       const d=await r.json();
-      if(!r.ok){$("abAdminMsg").textContent=d.error||"Failed — check the admin token.";return}
+      if(!r.ok){$("abAdminMsg").textContent=d.error||"Didn't work — double check the password.";return}
       $("abAdminMsg").textContent="Done.";
       loadAutobot();
-    }catch(e){console.error(e);$("abAdminMsg").textContent="Request failed.";}
+    }catch(e){console.error(e);$("abAdminMsg").textContent="Request failed — try again.";}
   }
   $("abAdminToken").value=getAdminToken();
   $("abHaltBtn").onclick=()=>autobotAdminAction("/api/autotrade/halt");
   $("abResumeBtn").onclick=()=>autobotAdminAction("/api/autotrade/resume");
-  $("abLiquidateBtn").onclick=()=>autobotAdminAction("/api/autotrade/liquidate-all","Force-sell every open autobot position right now, at whatever price is available? This can't be undone.");
+  $("abLiquidateBtn").onclick=()=>autobotAdminAction("/api/autotrade/liquidate-all","Sell everything the bot is holding, right now, at whatever price is available? This can't be undone.");
 
   connectStream();
   load();
