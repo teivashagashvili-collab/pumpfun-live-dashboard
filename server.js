@@ -104,6 +104,20 @@ async function persistentStats() {
   } catch { return { observations: 0, tokens: 0, outcomes5m: 0 }; }
 }
 
+// token_observations gets roughly one row per tracked token every refresh cycle (as often as
+// every ~15s-4min depending on rotation) — on a busy deployment that's easily hundreds of
+// thousands of rows a week, unbounded, on a Railway disk allowance that isn't unbounded. Nothing
+// reads rows older than a couple hours (persistentStats aggregates, nearestPrice only looks
+// within a call's own resolution window), so old rows are pure disk cost with zero value.
+const OBSERVATION_RETENTION_DAYS = Number(process.env.OBSERVATION_RETENTION_DAYS || 14);
+async function pruneOldObservations() {
+  if (!dbReady) return;
+  try {
+    const r = await pool.query(`DELETE FROM token_observations WHERE ts < now() - ($1 || ' days')::interval`, [String(OBSERVATION_RETENTION_DAYS)]);
+    if (r.rowCount) console.log(`pruned ${r.rowCount} token_observations rows older than ${OBSERVATION_RETENTION_DAYS}d`);
+  } catch (e) { console.error("pruneOldObservations failed:", e.message); }
+}
+
 // ---- deployer/creator reputation ----
 // pump.fun rug wallets routinely relaunch under a new token but the same creator address. We
 // already receive that address on every ingested token (t.creator) but previously never recorded
@@ -1071,6 +1085,7 @@ setInterval(() => {
 }, 60000);
 
 setInterval(() => resolveOutcomes().catch(e => console.error("resolveOutcomes failed:", e.message)), 2 * 60000);
+setInterval(() => pruneOldObservations().catch(e => console.error("pruneOldObservations failed:", e.message)), 6 * 60 * 60000); // every 6h
 
 initDB().catch(() => {});
 bootstrapDex();
