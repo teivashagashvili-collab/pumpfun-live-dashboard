@@ -496,13 +496,26 @@ function trendFor(t) {
 }
 
 // X/Twitter chatter is corroborating evidence, never a gate on its own — a token with no social
-// data yet still qualifies purely on-chain. Only a clear, broad-enough signal moves the score:
-// active negative sentiment (rug/scam callouts) is treated like a soft risk flag even when the
-// on-chain gates pass, and broad positive chatter gets a modest bonus. Thin/ambiguous social data
-// (few tweets, mixed sentiment) intentionally does nothing, since it's easy to fake with a handful
-// of bot accounts.
+// data yet still qualifies purely on-chain. Research into documented pump-and-dump mechanics
+// (academic studies on abnormal tweet-volume spikes preceding pumps and reversing after; SEC
+// cases against paid "KOL" promoters; studied coordinated Telegram pump rings) points the same
+// direction: a SUDDEN burst of mentions is usually the signature of a coordinated/paid push, not
+// organic discovery — the promoter and their circle already hold and are counting on the
+// attention to supply their exit liquidity. So a spike, synchronized posting timing, or a wave of
+// brand-new accounts is treated as a caution flag, not a bonus. Only slow, broad, sustained
+// positive chatter from established accounts — the opposite signature — gets a small positive
+// nudge, and only when there's no coordination flag alongside it.
+const SOCIAL_COORDINATION_MIN_TWEETS = 8;
+function isCoordinatedSocial(soc) {
+  if (!soc || soc.tweetCount < SOCIAL_COORDINATION_MIN_TWEETS) return false;
+  return (soc.spikeRatio != null && soc.spikeRatio >= 5)
+    || (soc.syncRatio != null && soc.syncRatio >= 0.5)
+    || (soc.newAccountRatio != null && soc.newAccountRatio >= 0.6);
+}
+
 function socialAdjustment(soc) {
   if (!soc || !soc.tweetCount) return 0;
+  if (isCoordinatedSocial(soc)) return -10;
   if (soc.tweetCount >= 5 && soc.sentiment <= -0.4) return -12;
   if (soc.tweetCount >= 5 && soc.uniqueAuthors >= 4 && soc.sentiment >= 0.3) return 6;
   return 0;
@@ -511,9 +524,31 @@ function socialAdjustment(soc) {
 function socialReason(soc) {
   if (!X_BEARER_TOKEN) return null;
   if (!soc || !soc.tweetCount) return soc ? "No recent X mentions found" : null;
+  if (isCoordinatedSocial(soc)) {
+    const flags = [];
+    if (soc.spikeRatio != null && soc.spikeRatio >= 5) flags.push("mentions spiked " + soc.spikeRatio + "x since the last check");
+    if (soc.syncRatio != null && soc.syncRatio >= 0.5) flags.push(Math.round(soc.syncRatio * 100) + "% landed in the same few minutes");
+    if (soc.newAccountRatio != null && soc.newAccountRatio >= 0.6) flags.push(Math.round(soc.newAccountRatio * 100) + "% of accounts are under 30 days old");
+    return "X activity looks coordinated, not organic (" + flags.join("; ") + ") — treated as a caution signal, not a bullish one";
+  }
   if (soc.tweetCount >= 5 && soc.sentiment <= -0.4) return "X sentiment is actively negative (" + soc.tweetCount + " mentions) — treated as an added risk signal";
-  if (soc.tweetCount >= 5 && soc.uniqueAuthors >= 4 && soc.sentiment >= 0.3) return "X shows broad, positive chatter (" + soc.tweetCount + " mentions, " + soc.uniqueAuthors + " accounts)";
+  if (soc.tweetCount >= 5 && soc.uniqueAuthors >= 4 && soc.sentiment >= 0.3) return "X shows broad, steady, positive chatter (" + soc.tweetCount + " mentions, " + soc.uniqueAuthors + " accounts)";
   return soc.tweetCount + " recent X mention" + (soc.tweetCount === 1 ? "" : "s") + ", no strong signal either way";
+}
+
+// The documented KOL-pump mechanism specifically pairs insiders/bundled wallets buying early with
+// a coordinated social push that draws retail in to sell into. Either signal alone is soft
+// evidence; both firing together on the same token is much stronger evidence of that exact
+// mechanism, so it carries an additional penalty beyond the sum of the two individual ones.
+function manipulationAdjustment(t) {
+  const bundleFlag = t.bundle && t.bundle.sampledTxns >= 10 && t.bundle.clusterRatio >= 0.3;
+  return bundleFlag && isCoordinatedSocial(t.social) ? -15 : 0;
+}
+
+function manipulationReason(t) {
+  const bundleFlag = t.bundle && t.bundle.sampledTxns >= 10 && t.bundle.clusterRatio >= 0.3;
+  if (!bundleFlag || !isCoordinatedSocial(t.social)) return null;
+  return "Bundled/sniped launch activity AND coordinated-looking social promotion are both present — the documented pattern behind KOL-driven pump-and-dumps (insiders buy early, paid/coordinated promotion draws buyers, insiders sell into it)";
 }
 
 function candidateScore(t) {
@@ -528,12 +563,16 @@ function candidateScore(t) {
   // until the wallet actually pulls, so this launch's own on-chain metrics aren't sufficient
   // evidence to override the creator's track record.
   if (t.creatorRep && t.creatorRep.launches >= 3 && t.creatorRep.rugRate >= 50) return -1;
+  // Bundled/sniped launch activity AND coordinated-looking social promotion together on the same
+  // token is the specific documented signature of a KOL/insider pump-and-dump (see
+  // manipulationReason) — strong enough evidence to exclude outright, not just penalize.
+  if (manipulationAdjustment(t) < 0) return -1;
   return s.score + Math.min(12, Math.log10(Math.max(1, vol))) + (mc > 0 && mc < 5000000 ? 7 : 0) + (age <= 24 ? 4 : 0) + (vl >= 5 ? 4 : 0) + socialAdjustment(t.social) + creatorAdjustment(t.creatorRep) + holderAdjustment(t.rug) + bundleAdjustment(t.bundle);
 }
 
 function classify(t) {
   const p = t.pair || {}, mc = +p.marketCap || +p.fdv || 0, age = p.pairCreatedAt ? Math.max(0, (Date.now() - p.pairCreatedAt) / 3600000) : 9999;
-  if (t.rug?.rugged || +t.rug?.scoreNormalized >= 45 || (t.creatorRep && t.creatorRep.launches >= 3 && t.creatorRep.rugRate >= 50)) return "RISK";
+  if (t.rug?.rugged || +t.rug?.scoreNormalized >= 45 || (t.creatorRep && t.creatorRep.launches >= 3 && t.creatorRep.rugRate >= 50) || manipulationAdjustment(t) < 0) return "RISK";
   if (mc > 25000000) return "ESTABLISHED";
   if (age <= 24) return "EARLY";
   if (age <= 72) return "DEVELOPING";
@@ -636,7 +675,7 @@ async function fetchXSignal(t) {
   const sym = sanitizeForPrompt(t.symbol, 20).replace(/[^A-Za-z0-9]/g, "");
   if (!sym) return null;
   const query = encodeURIComponent(`($${sym} OR ${t.mint}) -is:retweet lang:en`);
-  const url = `https://api.x.com/2/tweets/search/recent?query=${query}&max_results=25&tweet.fields=public_metrics,created_at&expansions=author_id&user.fields=public_metrics`;
+  const url = `https://api.x.com/2/tweets/search/recent?query=${query}&max_results=25&tweet.fields=public_metrics,created_at&expansions=author_id&user.fields=public_metrics,created_at`;
   try {
     const j = await getJSON(url, 10000, { authorization: "Bearer " + X_BEARER_TOKEN });
     const tweets = Array.isArray(j?.data) ? j.data : [];
@@ -644,15 +683,29 @@ async function fetchXSignal(t) {
     const authorIds = new Set();
     let pos = 0, neg = 0, reach = 0;
     const sample = [];
+    const buckets = new Map(); // coarse 5-min posting-time buckets, to spot synchronized/coordinated bursts
     for (const tw of tweets) {
       if (tw.author_id) authorIds.add(tw.author_id);
       const k = keywordSentiment(tw.text);
       pos += k.pos; neg += k.neg;
       if (sample.length < 5) sample.push(sanitizeForPrompt(tw.text, 220));
+      const ts = tw.created_at ? Date.parse(tw.created_at) : NaN;
+      if (Number.isFinite(ts)) { const b = Math.floor(ts / (5 * 60000)); buckets.set(b, (buckets.get(b) || 0) + 1); }
     }
     for (const id of authorIds) reach += +(users.get(id)?.public_metrics?.followers_count || 0);
+    // Account novelty: what fraction of the accounts mentioning this token were themselves created
+    // very recently — a classic signature of a sybil/throwaway-account shill push.
+    const now = Date.now();
+    let newAccounts = 0, authorsWithAge = 0;
+    for (const id of authorIds) {
+      const created = users.get(id)?.created_at ? Date.parse(users.get(id).created_at) : NaN;
+      if (Number.isFinite(created)) { authorsWithAge++; if (now - created < 30 * 24 * 3600000) newAccounts++; }
+    }
+    const newAccountRatio = authorsWithAge ? +(newAccounts / authorsWithAge).toFixed(2) : null;
+    const maxBucket = buckets.size ? Math.max(...buckets.values()) : 0;
+    const syncRatio = tweets.length ? +(maxBucket / tweets.length).toFixed(2) : null;
     const sentiment = pos + neg ? (pos - neg) / (pos + neg) : 0;
-    return { tweetCount: tweets.length, uniqueAuthors: authorIds.size, reach, sentiment, sample, checkedAt: Date.now() };
+    return { tweetCount: tweets.length, uniqueAuthors: authorIds.size, reach, sentiment, sample, newAccountRatio, syncRatio, checkedAt: Date.now() };
   } catch (e) { console.error("X social fetch failed:", e.message); return null; }
 }
 
@@ -660,7 +713,14 @@ async function socialFor(t) {
   const cached = socialCache.get(t.mint);
   if (cached && Date.now() - cached.at < SOCIAL_CACHE_MS) return cached.data;
   const data = await fetchXSignal(t);
-  if (data) { socialCache.set(t.mint, { data, at: Date.now() }); return data; }
+  if (data) {
+    // Velocity vs the previous scan (cache window is a few minutes) — a sharp jump in mention
+    // count in a short window is the spike signature the research flagged, independent of the
+    // absolute count.
+    if (cached?.data) data.spikeRatio = +(data.tweetCount / Math.max(1, cached.data.tweetCount)).toFixed(2);
+    socialCache.set(t.mint, { data, at: Date.now() });
+    return data;
+  }
   return cached?.data || null;
 }
 
@@ -918,7 +978,7 @@ async function llmAgent(question, walletAddress) {
     volume1h: t.pair?.volume?.h1, buys: t.pair?.txns?.h1?.buys, sells: t.pair?.txns?.h1?.sells,
     risk: t.rug?.scoreNormalized, plan: tradePlan(t),
     creatorTrackRecord: t.creatorRep ? { priorLaunches: t.creatorRep.launches, ruggedCount: t.creatorRep.rugged, rugRatePct: t.creatorRep.rugRate } : null,
-    xSocial: t.social ? { recentMentions: t.social.tweetCount, uniqueAccounts: t.social.uniqueAuthors, sentimentScore: +t.social.sentiment.toFixed(2), sampleUntrustedPostText: t.social.sample } : null,
+    xSocial: t.social ? { recentMentions: t.social.tweetCount, uniqueAccounts: t.social.uniqueAuthors, sentimentScore: +t.social.sentiment.toFixed(2), spikeRatioSinceLastCheck: t.social.spikeRatio ?? null, syncRatio: t.social.syncRatio ?? null, newAccountRatio: t.social.newAccountRatio ?? null, coordinatedLooking: isCoordinatedSocial(t.social), sampleUntrustedPostText: t.social.sample } : null,
     holderConcentration: t.rug && t.rug.top10HolderPct != null ? { top10Pct: t.rug.top10HolderPct, creatorHoldingPct: t.rug.creatorHoldingPct } : null,
     bundleHeuristic: t.bundle ? { sampledTxns: t.bundle.sampledTxns, clusterRatio: t.bundle.clusterRatio, note: "coarse proxy from RPC slot-clustering, not a confirmed bundle detector" } : null
   }));
@@ -948,7 +1008,7 @@ Ground advice in real trading practice, not vibes: a widely-used memecoin risk r
 
 Do not promise profits or claim a token will 100x. Distinguish observation from inference. If evidence is insufficient, say so plainly. The scanner's qualified candidates are research candidates, not guaranteed buys. When asked for an entry or exit call, give the clearly labeled rules-based research plan from the supplied live data with real numbers. Give NO ENTRY when eligibility fails, and say why in plain terms. For exits, state the staged percentages and market-cap multiples as a mechanical scenario, never as a prediction or certainty.
 
-A candidate's creatorTrackRecord shows how many prior tokens that deployer wallet launched and what fraction rugged — treat a high rug rate as a serious red flag even if the current launch's own metrics look clean, since rug setups are deliberately designed to look clean until the wallet pulls. A candidate's holderConcentration.top10Pct is how much of supply the ten biggest wallets control — above ~30% is commonly considered fragile (repeated industry heuristic, not a rigorously proven cutoff, say so if asked). A candidate's bundleHeuristic is a coarse proxy for many wallets buying in the same block as creation (a sniper/insider pattern) — it is NOT a confirmed bundle detector, say so explicitly if you reference it. A candidate's xSocial is corroborating social evidence only (never sufficient on its own) — a handful of posts can be a few bot accounts, so weight it by uniqueAccounts and mention volume, not just sentimentScore.
+A candidate's creatorTrackRecord shows how many prior tokens that deployer wallet launched and what fraction rugged — treat a high rug rate as a serious red flag even if the current launch's own metrics look clean, since rug setups are deliberately designed to look clean until the wallet pulls. A candidate's holderConcentration.top10Pct is how much of supply the ten biggest wallets control — above ~30% is commonly considered fragile (repeated industry heuristic, not a rigorously proven cutoff, say so if asked). A candidate's bundleHeuristic is a coarse proxy for many wallets buying in the same block as creation (a sniper/insider pattern) — it is NOT a confirmed bundle detector, say so explicitly if you reference it. A candidate's xSocial is corroborating social evidence only (never sufficient on its own) — a handful of posts can be a few bot accounts, so weight it by uniqueAccounts and mention volume, not just sentimentScore. Important and counterintuitive: treat a SUDDEN mention spike, synchronized posting timing (high syncRatio), or a wave of brand-new accounts (high newAccountRatio) as a WARNING sign, not a bullish one — coordinatedLooking flags this directly. Documented research on pump-and-dump mechanics shows abnormal tweet-volume spikes precede pumps and are followed by reversals, because the usual mechanism is a coordinated or paid promotion (a "KOL call") where the promoter and their circle already hold and are counting on the attention they generate to supply their own exit liquidity — the classic pattern is early insider buying (sometimes visible as this system's bundleHeuristic) followed by a promotional push, then the insiders sell into the buying they created. Only slow, broad, sustained positive chatter from established accounts with no spike/sync/new-account flags is a mild positive signal. If asked about influencer or "KOL" calls specifically, explain this dynamic honestly rather than treating a call as validation.
 
 Persistent observations: ${stats.observations}; tracked historical tokens: ${stats.tokens}; positive 5m outcome observations: ${stats.outcomes5m}.${perf ? ` Measured historical call performance (net of an assumed ${SLIPPAGE_BPS}bps round-trip slippage): ${JSON.stringify(perf.timeframes)}. Always mention this measured track record, including small sample sizes, when discussing whether the system's calls actually work.` : ""}${calibration && calibration.length ? ` Score calibration (measured win rate by score tier, so you can say whether higher scores actually perform better in practice, not just by assumption): ${JSON.stringify(calibration)}.` : ""}${paper && paper.trades ? ` Simulated paper track record (equal $${paper.notionalPerTrade} per call, held to 1h, net of assumed slippage — NOT a real balance, just what following every call would have done): $${paper.totalInvested} invested across ${paper.trades} calls, cumulative P&L $${paper.cumulativePnl} (${paper.cumulativeReturnPct}%). Always call this simulated/hypothetical, never a real account balance, and mention the small sample size.` : ""}${walletContext} Current qualified candidates: ${JSON.stringify(candidates)}`;
   try {
@@ -982,14 +1042,24 @@ const GLOSSARY = [
   { keys: ["fomo"], text: "FOMO (fear of missing out) is the urge to buy purely because a price is already shooting up and you don't want to miss the ride. It's the single most common reason people buy at the worst possible price — chasing a vertical move has empirically been a bad average entry, which is why this system's own entry logic prefers a pullback over a chase." },
   { keys: ["invalidation", "stop loss", "stop-loss"], text: "An invalidation level (or stop loss) is the price where you decide your idea was wrong and exit, decided BEFORE you enter — not improvised in the moment while watching the price fall. Without one, 'hope' becomes the exit strategy, which is how small losses turn into total ones." },
   { keys: ["diamond hand", "paper hand"], text: "'Diamond hands' means holding through volatility without panic-selling; 'paper hands' means selling at the first dip. Neither is automatically right — diamond-handing a token that's actually failing is just as costly as paper-handing one that was fine. The invalidation level is what's supposed to tell you which situation you're in." },
-  { keys: ["dyor"], text: "DYOR means 'do your own research' — a reminder that any tool (including this one) is giving you research inputs, not a decision made for you. This system deliberately never tells you what to do, only what the live data shows." }
+  { keys: ["dyor"], text: "DYOR means 'do your own research' — a reminder that any tool (including this one) is giving you research inputs, not a decision made for you. This system deliberately never tells you what to do, only what the live data shows." },
+  { keys: ["kol", "influencer call", "influencer"], text: "A KOL (key opinion leader) call is when an influencer publicly names a token. Documented cases (SEC actions against Kim Kardashian, Ian Balina, and seven others in a $100M scheme) and academic research show a common pattern: the promoter and their circle already hold, the call/paid promotion draws in buyers, and price often tops out shortly after — the call itself can be the exit liquidity mechanism, not a signal to follow. This system treats a sudden coordinated-looking social spike as a caution flag for exactly this reason, not a bullish one." },
+  { keys: ["shill", "shilling"], text: "Shilling is promoting a token you hold (often without disclosing that) to get other people to buy and push the price up for you to sell into. It's the core mechanic behind most influencer-driven pump-and-dumps — treat any 'this is going to moon' post with more suspicion the more urgency it uses." },
+  { keys: ["exit liquidity"], text: "Exit liquidity means the buyers whose purchases let earlier holders (often insiders, or an influencer who called it) sell out at a good price. If you're buying because a token is already trending or because an influencer just called it, there's a real chance you ARE the exit liquidity, not the next winner." },
+  { keys: ["insider bag", "insider allocation", "presale allocation"], text: "An insider bag (or presale/team allocation) is a chunk of supply held by the team or connected wallets before the public could buy. A large insider allocation is a dump risk — this system's holder-concentration and deployer-history checks both try to surface this." },
+  { keys: ["cabal"], text: "A 'cabal' is a cluster of wallets, often funded from a common source, that coordinate buying (and later selling) a token — a more organized version of a bundle. Tools like Bubblemaps visualize wallet clusters like this; this system's bundle heuristic is a much simpler, coarser approximation of the same idea." },
+  { keys: ["memecoin supercycle"], text: "The 'memecoin supercycle' is a thesis (associated with trader Murad Mahmudov) that community/narrative-driven memecoins can structurally outperform fundamentals-driven crypto assets. It's a widely-discussed belief in this market, not a proven law — worth knowing the term exists, not worth treating as guaranteed." },
+  { keys: ["crypto twitter", "what does alpha mean", "what is alpha", "ape in"], text: "CT ('Crypto Twitter') is slang for the crypto community on X. 'Alpha' means an early edge or piece of information; 'ape in' means buying fast without much research. All three are just jargon — none of them make a trade safer." }
 ];
 
 function glossaryAnswer(q) {
   const isDefinitionQuestion = q.includes("what is") || q.includes("what's") || q.includes("what are") || q.includes("what does") || q.includes("explain") || q.includes("mean") || q.includes("define");
   if (!isDefinitionQuestion) return null;
-  for (const entry of GLOSSARY) if (entry.keys.some(k => q.includes(k))) return entry.text;
-  return null;
+  // Match the LONGEST matching key across all entries, not the first entry in array order — e.g.
+  // "exit liquidity" must win over the generic "liquidity" entry when both are substring matches.
+  let best = null, bestLen = 0;
+  for (const entry of GLOSSARY) for (const k of entry.keys) if (q.includes(k) && k.length > bestLen) { best = entry; bestLen = k.length; }
+  return best ? best.text : null;
 }
 
 async function agentAnswer(question, walletAddress) {
@@ -1016,13 +1086,18 @@ async function agentAnswer(question, walletAddress) {
   else if (glossary) answer = glossary;
   else if ((q.includes("how much") || q.includes("position siz") || q.includes("bankroll")) && (q.includes("invest") || q.includes("buy") || q.includes("put in") || q.includes("risk") || q.includes("size") || q.includes("bankroll"))) answer = "There's no single right answer since I don't know your bankroll, but the widely-used rule of thumb for memecoins specifically is small: roughly 1-5% of your total trading bankroll per token, not per trade session. Memecoins can go to zero fast and often do — size positions as money you're fully OK losing, not money you need back. A second rule some traders use: keep any single position under about 1/10th of the token's own 24h volume, so you're not the one propping up the price on the way out. Neither of these is personalized advice, just common practice.";
   else if (q.includes("risk") || q.includes("rug") || q.includes("scam") || q.includes("safe")) answer = "Safety is a hard gate here. I exclude RugCheck flags/elevated risk, thin liquidity, weak activity, weak volume/liquidity, and serial-rug deployer wallets (3+ prior launches with a 50%+ rug rate) from qualified opportunities, and factor in holder concentration and a bundle/sniper heuristic where available. " + risks.length + " tracked tokens currently show elevated risk. Ask me about a specific token by name for its individual safety picture.";
+  else if (q.includes("influencer") || q.includes("kol") || q.includes("called it") || q.includes("just posted") || q.includes("shill")) {
+    const social = requested?.social;
+    const specific = requested && social ? (isCoordinatedSocial(social) ? " For " + requested.name + " specifically, the current X activity does look coordinated rather than organic — treated as a caution flag here, not confirmation." : social.tweetCount ? " For " + requested.name + " specifically, current X activity doesn't show the coordination signature (sudden spike / synchronized timing / wave of new accounts) — that's not the same as safe, just not that particular flag." : "") : "";
+    answer = "An influencer or KOL naming a token isn't a safety signal on its own — documented cases (SEC actions against paid promoters, studied pump-and-dump rings) show the common pattern is: promoter already holds, the call draws buyers, price tops out shortly after as the promoter sells into the attention they generated. You can end up being the exit liquidity for the call, not the next winner. This system treats a sudden, synchronized, or new-account-heavy mention spike as a caution flag, specifically because of this pattern." + specific;
+  }
   else if (q.includes("perform") || q.includes("track record") || q.includes("accuracy") || q.includes("win rate") || q.includes("does this work") || q.includes("does this make money") || (q.includes("money") && !q.includes("how much"))) { const perf = await performanceStats(); const paper = await paperTrackRecord("1h"); const paperLine = paper && paper.trades ? " Simulated paper track record (hypothetical, not a real balance): $" + paper.notionalPerTrade + " per call across " + paper.trades + " calls held to 1h would show a cumulative P&L of $" + paper.cumulativePnl + " (" + paper.cumulativeReturnPct + "%)." : ""; answer = perf && perf.totalLogged ? "Measured track record (net of an assumed " + SLIPPAGE_BPS + "bps round-trip slippage): " + Object.entries(perf.timeframes).map(([k, v]) => k + " — " + (v.resolved || 0) + " resolved, " + (v.winRate ?? "—") + "% win rate, " + (v.avgNetPct ?? "—") + "% avg return").join("; ") + "." + paperLine + " Sample sizes are still small; treat this as directional, not proof of edge." : "Not enough resolved calls yet to report a measured track record. The system needs time to log calls and observe outcomes before performance numbers are meaningful."; }
   else if (q.includes("learn") || q.includes("study")) { const ps = await persistentStats(); answer = "The learning system persists market observations in PostgreSQL. It has " + ps.observations + " observations across " + ps.tokens + " tokens, with " + ps.outcomes5m + " positive 5-minute follow-through observations in the persistent store. In-process learning currently has " + learning.samples + " samples. Every qualified call is now logged with its entry price and resolved against real outcomes at 5m/15m/1h, net of estimated slippage — ask me about performance for the measured results."; }
   else if (q.includes("market") || q.includes("regime")) answer = "I'm monitoring fresh-token flow, momentum, buyer/seller balance, liquidity, volume/liquidity, pair age and market-cap expansion room. Those are observable microstructure signals; they are not proof of a macroeconomic causal relationship.";
   else if (q.includes("call") || q.includes("buy") || q.includes("pick") || q.includes("entry") || q.includes("exit") || q.includes("sell") || q.includes("100x") || q.includes("price")) {
     if (requested && plan) {
       const ladder = (plan.exits || []).slice(0, 4).map(x => "+" + ((x.multiple - 1) * 100).toFixed(0) + "%: sell " + x.sellPct + "% at MC " + usd(x.mc)).join("; ");
-      const extra = [creatorReason(requested.creatorRep), holderReason(requested.rug), bundleReason(requested.bundle), socialReason(requested.social)].filter(Boolean).join(" ");
+      const extra = [manipulationReason(requested), creatorReason(requested.creatorRep), holderReason(requested.rug), bundleReason(requested.bundle), socialReason(requested.social)].filter(Boolean).join(" ");
       answer = plan.eligible
         ? "ENTRY WATCH for " + requested.name + " (" + requested.symbol + "). Score " + plan.score + "/100. Entry band: " + usd(plan.entry.low) + "–" + usd(plan.entry.high) + " (" + plan.entry.reason + "). Invalidation — the price where this idea is wrong and you're out: " + usd(plan.invalidation.price) + " (" + plan.invalidation.percent + "% from here). Profit-taking scenario: " + ladder + ". Keep " + plan.runner.pct + "% as a runner only while structure stays constructive; reconsider if 1h momentum rolls over, sellers dominate, or liquidity deteriorates. This is a mechanical research scenario from live data, not personalized advice." + (extra ? " " + extra + "." : "")
         : "NO ENTRY for " + requested.name + " (" + requested.symbol + ") right now. Score " + plan.score + "/100, risk " + plan.risk + ", liquidity " + usd(plan.liquidity) + ". The gates exist to keep bad setups out — waiting for them to clear is usually better than forcing an entry on a token that hasn't earned it yet." + (extra ? " " + extra + "." : "");

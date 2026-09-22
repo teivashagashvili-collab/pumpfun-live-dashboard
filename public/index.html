@@ -105,8 +105,8 @@ th.tip:hover::after{top:150%}
 </section>
 
 <section id="market" class="page"><div class="two">
-<section class="card"><h1 style="font-size:19px">What the scanner looks at</h1><div class="statline"><span>Momentum</span><b>5m + 1h price change</b></div><div class="statline"><span>Flow</span><b>Buy / sell balance</b></div><div class="statline"><span>Liquidity</span><b>Can you actually exit</b></div><div class="statline"><span>Activity</span><b>Trade count + volume</b></div><div class="statline"><span>Risk gate</span><b>RugCheck score + rugged flag</b></div><div class="statline"><span>Holder concentration</span><b>How much of supply the top 10 wallets control</b></div><div class="statline"><span>Deployer history</span><b>Rug rate across this wallet's prior launches</b></div><div class="statline"><span>Bundle heuristic</span><b>Same-block buying at launch — a coarse proxy, not confirmed</b></div><div class="statline"><span>Social (optional)</span><b>X/Twitter mention volume + sentiment, corroborating only</b></div></section>
-<section class="card"><h1 style="font-size:19px">Honest limits</h1><p class="muted">A qualified setup is a rules-based research candidate, not a guarantee. Pump.fun tokens are frequently manipulated, and past patterns can stop working without warning.</p><p class="muted">Every qualified call is logged with its entry price, and its real 5m/15m/1h outcome is measured automatically — see the track record and score calibration on the Qualified tab.</p><p class="muted">Deployer history and social signal only ever adjust a score that already passed every other gate, or exclude a token outright for a proven serial-rug pattern — a clean deployer history or no social data never qualifies a token by itself.</p></section>
+<section class="card"><h1 style="font-size:19px">What the scanner looks at</h1><div class="statline"><span>Momentum</span><b>5m + 1h price change</b></div><div class="statline"><span>Flow</span><b>Buy / sell balance</b></div><div class="statline"><span>Liquidity</span><b>Can you actually exit</b></div><div class="statline"><span>Activity</span><b>Trade count + volume</b></div><div class="statline"><span>Risk gate</span><b>RugCheck score + rugged flag</b></div><div class="statline"><span>Holder concentration</span><b>How much of supply the top 10 wallets control</b></div><div class="statline"><span>Deployer history</span><b>Rug rate across this wallet's prior launches</b></div><div class="statline"><span>Bundle heuristic</span><b>Same-block buying at launch — a coarse proxy, not confirmed</b></div><div class="statline"><span>Social (optional)</span><b>X/Twitter mention pattern — coordination is a caution flag, not a bullish one</b></div><div class="statline"><span>KOL/manipulation check</span><b>Bundled launch + coordinated social hype together = excluded outright</b></div></section>
+<section class="card"><h1 style="font-size:19px">Honest limits</h1><p class="muted">A qualified setup is a rules-based research candidate, not a guarantee. Pump.fun tokens are frequently manipulated, and past patterns can stop working without warning.</p><p class="muted">Every qualified call is logged with its entry price, and its real 5m/15m/1h outcome is measured automatically — see the track record and score calibration on the Qualified tab.</p><p class="muted">Deployer history and social signal only ever adjust a score that already passed every other gate, or exclude a token outright for a serial-rug deployer pattern or the documented bundle+coordinated-hype manipulation signature — a clean deployer history or no social data never qualifies a token by itself.</p></section>
 </div></section>
 
 <section id="agent" class="page"><div class="agent"><section class="card chat"><div><small class="muted">AI RESEARCH AGENT</small><h1 style="font-size:20px;margin:4px 0 10px">Ask about the market</h1><div id="chat"></div></div><div class="chips"><button class="chip" data-q="What are the strongest qualified setups right now?">Strongest setups</button><button class="chip" data-q="What price should I enter at?">Entry price</button><button class="chip" data-q="How much should I invest?">How much to risk</button><button class="chip" data-q="Which tokens look risky and why?">Risk check</button><button class="chip" data-q="What's your measured track record?">Track record</button><button class="chip" data-q="What does liquidity mean?">What's liquidity?</button></div><div class="inputrow"><input id="ask" placeholder="Ask a question about the live market…"><button id="askbtn" class="btn primary">Ask</button></div></section><aside class="card"><small class="muted">HOW IT ANSWERS</small><p style="font-size:13px">Reads live prices, liquidity, risk flags and the measured outcomes of past calls — never invents facts.</p><div class="notice">Not financial advice. Treat every answer as a research scenario, not a guarantee.</div></aside></div></section>
@@ -140,18 +140,22 @@ th.tip:hover::after{top:150%}
   const M=new Map();
   let qualifiedOnly=false;
   const $=id=>document.getElementById(id);
-  // Same gate the server uses for "qualified" (candidateScore>=72 && quality): score, liquidity,
-  // no active risk flag, and no serial-rug deployer history. Kept in sync with the KPI count below
-  // so clicking it matches what's shown.
+  // Same gates the server uses for "qualified" (candidateScore>=72 && quality): score, liquidity,
+  // no active risk flag, no serial-rug deployer history, and no bundle+coordinated-social
+  // manipulation combo. Kept in sync with the KPI count below so clicking it matches what's shown.
   const isSerialRugger=t=>!!(t.creatorRep&&t.creatorRep.launches>=3&&t.creatorRep.rugRate>=50);
-  const isQualified=t=>!!(t.quality&&t.signal?.score>=72&&t.pair&&Number(t.pair.liquidity?.usd)>=10000&&!(t.rug?.rugged||Number(t.rug?.scoreNormalized)>=45)&&!isSerialRugger(t));
+  // Sudden/synchronized/new-account-heavy mention spikes are treated as a coordination flag, not a
+  // bullish one — see server-side isCoordinatedSocial for the research behind this.
+  const isCoordinatedSocial=soc=>!!(soc&&soc.tweetCount>=8&&((soc.spikeRatio!=null&&soc.spikeRatio>=5)||(soc.syncRatio!=null&&soc.syncRatio>=0.5)||(soc.newAccountRatio!=null&&soc.newAccountRatio>=0.6)));
+  const isManipulationFlagged=t=>!!(t.bundle&&t.bundle.sampledTxns>=10&&t.bundle.clusterRatio>=0.3&&isCoordinatedSocial(t.social));
+  const isQualified=t=>!!(t.quality&&t.signal?.score>=72&&t.pair&&Number(t.pair.liquidity?.usd)>=10000&&!(t.rug?.rugged||Number(t.rug?.scoreNormalized)>=45)&&!isSerialRugger(t)&&!isManipulationFlagged(t));
   // Plain-word safety badge instead of a raw 0-100 risk number — research on how real trading
   // tools present safety consistently favors a traffic-light word (Safe/Caution/Danger) over a
   // number nobody has a reference point for. The raw score is still available on hover for anyone
   // who wants it.
   function safetyLabel(t){
     const s=Number(t.rug?.scoreNormalized);
-    if(t.rug?.rugged||isSerialRugger(t))return{text:"Danger",cls:"risk"};
+    if(t.rug?.rugged||isSerialRugger(t)||isManipulationFlagged(t))return{text:"Danger",cls:"risk"};
     if(!Number.isFinite(s))return{text:"Checking…",cls:""};
     if(s>=45)return{text:"Danger",cls:"risk"};
     if(s>=30)return{text:"Caution",cls:"warn"};
@@ -208,7 +212,7 @@ th.tip:hover::after{top:150%}
       return '<tr class="coin-row" data-dex="'+esc(dex(t))+'"><td><div class="token-cell">'+avatar(t)+'<div><div class="token-name">'+esc(t.name||"Metadata pending")+'</div><div class="token-sub">'+esc(t.symbol||"—")+' <span class="tag '+catClass+'">'+esc(t.category||"—")+'</span></div></div></div></td><td>'+money(p.priceUsd)+'</td><td class="'+(Number(p.priceChange?.m5)>=0?"pos":"neg")+'">'+pct(p.priceChange?.m5)+'</td><td class="'+(Number(p.priceChange?.h1)>=0?"pos":"neg")+'">'+pct(p.priceChange?.h1)+'</td><td>'+money(p.liquidity?.usd)+'</td><td>'+safetyBadge(t)+'</td><td><span class="badge '+scoreClass+'">'+(s.score??0)+'</span></td><td>'+sparkline(t.chart)+'</td></tr>';
     }).join(""):'<tr><td colspan="8" class="empty">Waiting for live market data…</td></tr>';
     $("n").textContent=all.length;
-    $("r").textContent=all.filter(t=>t.rug&&(t.rug.rugged||Number(t.rug.scoreNormalized)>=45)).length;
+    $("r").textContent=all.filter(t=>(t.rug&&(t.rug.rugged||Number(t.rug.scoreNormalized)>=45))||isManipulationFlagged(t)).length;
     $("s").textContent=all.filter(isQualified).length;
     $("feed").innerHTML=z.slice(0,8).map(t=>'<div class="item">'+avatar(t)+'<div><b>'+esc(t.symbol||"—")+'</b><br><small class="muted">'+Number(t.signal?.score||0)+'/100 · '+esc(t.category||"—")+'</small></div></div>').join("")||'<div class="empty">Waiting for data.</div>';
   }
@@ -317,9 +321,10 @@ th.tip:hover::after{top:150%}
   }
 
   function loadRisk(){
-    const z=[...M.values()].filter(t=>(t.rug&&(t.rug.rugged||Number(t.rug.scoreNormalized)>=30))||isSerialRugger(t)).sort((a,b)=>(b.rug?.scoreNormalized||0)-(a.rug?.scoreNormalized||0)).slice(0,30);
+    const z=[...M.values()].filter(t=>(t.rug&&(t.rug.rugged||Number(t.rug.scoreNormalized)>=30))||isSerialRugger(t)||isManipulationFlagged(t)).sort((a,b)=>(b.rug?.scoreNormalized||0)-(a.rug?.scoreNormalized||0)).slice(0,30);
     $("riskGrid").innerHTML=z.map(t=>{
       const notes=[
+        isManipulationFlagged(t)?'Bundled launch activity + coordinated-looking X promotion — the documented KOL pump-and-dump pattern':null,
         isSerialRugger(t)?t.creatorRep.launches+' prior launches, '+t.creatorRep.rugRate+'% rugged':null,
         t.rug&&t.rug.top10HolderPct!=null?'Top 10 wallets hold '+t.rug.top10HolderPct+'% of supply':null
       ].filter(Boolean).map(n=>'<p class="muted" style="font-size:11.5px;color:var(--red)">'+esc(n)+'</p>').join("");
