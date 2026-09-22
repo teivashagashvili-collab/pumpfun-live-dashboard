@@ -43,6 +43,9 @@ tr:hover{background:#0d211b}
 .blue{color:var(--blue)}
 .pos{color:var(--green)}.neg{color:var(--red)}
 a{color:var(--green);text-decoration:none}
+.tip{border-bottom:1px dotted var(--muted);cursor:help;position:relative}
+.tip:hover::after,.tip:focus::after{content:attr(data-tip);position:absolute;left:0;top:130%;background:#0d1f18;border:1px solid var(--line);color:var(--text);padding:9px 11px;border-radius:9px;font-size:11.5px;font-weight:400;text-transform:none;letter-spacing:normal;line-height:1.4;white-space:normal;width:220px;z-index:60;box-shadow:0 8px 22px rgba(0,0,0,.45)}
+th.tip:hover::after{top:150%}
 .feed{padding:11px}
 .item{padding:10px;border:1px solid #173229;border-radius:10px;margin-bottom:7px;display:flex;align-items:center;gap:9px}
 .page{display:none}
@@ -79,8 +82,8 @@ a{color:var(--green);text-decoration:none}
 <nav class="nav"><button class="active" data-page="radar">Radar</button><button data-page="calls">Qualified</button><button data-page="history">History</button><button data-page="risk">Risk</button><button data-page="market">How it works</button><button data-page="agent">AI Agent</button><button data-page="wallet">Wallet</button></nav>
 
 <section id="radar" class="page active">
-<div class="kpis"><div class="card"><div class="kpi-label">Tracked</div><div id="n" class="value">0</div></div><div id="qCard" class="card" style="cursor:pointer" title="Click to show only qualified coins"><div class="kpi-label">Qualified</div><div id="s" class="value pos">0</div></div><div class="card"><div class="kpi-label">Risk flags</div><div id="r" class="value neg">0</div></div><div class="card"><div class="kpi-label">Stream</div><div id="st" class="value" style="font-size:15px">Connecting…</div></div></div>
-<div class="layout"><section class="box"><div class="head">Live radar <span id="radarFilterLabel" class="muted" style="font-weight:400;font-size:12px">Sorted by score</span></div><div class="scroll"><table><thead><tr><th>Token</th><th>Price</th><th>5m</th><th>1h</th><th>Liquidity</th><th>Risk</th><th>Score</th><th>Trend</th></tr></thead><tbody id="rows"><tr><td colspan="8" class="empty">Waiting for live market data…</td></tr></tbody></table></div></section><aside class="box"><div class="head">Top movers</div><div id="feed" class="feed"></div></aside></div>
+<div class="kpis"><div class="card"><div class="kpi-label tip" data-tip="How many pump.fun tokens this page is currently watching live.">Tracked</div><div id="n" class="value">0</div></div><div id="qCard" class="card" style="cursor:pointer" title="Click to show only qualified coins"><div class="kpi-label tip" data-tip="Tokens that passed every safety and liquidity check we run. Click this card to see just these.">Qualified</div><div id="s" class="value pos">0</div></div><div class="card"><div class="kpi-label tip" data-tip="Tokens currently flagged as risky — Caution or Danger on the safety badge.">Risk flags</div><div id="r" class="value neg">0</div></div><div class="card"><div class="kpi-label">Stream</div><div id="st" class="value" style="font-size:15px">Connecting…</div></div></div>
+<div class="layout"><section class="box"><div class="head">Live radar <span id="radarFilterLabel" class="muted" style="font-weight:400;font-size:12px">Sorted by score</span></div><div class="scroll"><table><thead><tr><th>Token</th><th>Price</th><th>5m</th><th>1h</th><th class="tip" data-tip="How much money is sitting in the trading pair. More liquidity = easier to buy and sell without moving the price much.">Liquidity</th><th class="tip" data-tip="A plain-word safety check: Safe, Caution, or Danger. Automated checks only — never a guarantee.">Safety</th><th class="tip" data-tip="0-100. Blends momentum, buyer/seller balance, liquidity, volume and safety into one number. 72+ means it passed every gate.">Score</th><th>Trend</th></tr></thead><tbody id="rows"><tr><td colspan="8" class="empty">Waiting for live market data…</td></tr></tbody></table></div></section><aside class="box"><div class="head">Top movers</div><div id="feed" class="feed"></div></aside></div>
 </section>
 
 <section id="calls" class="page">
@@ -92,8 +95,8 @@ a{color:var(--green);text-decoration:none}
 </section>
 
 <section id="history" class="page">
-<div class="hero"><small class="muted">CALL HISTORY</small><h1>Every logged call, with what actually happened</h1><p>Each row is a real qualified call at the moment it fired, with its price then and its measured return since — net of an assumed round-trip trading cost. Pending means the timeframe hasn't elapsed yet.</p></div>
-<section class="box"><div class="head">Recent calls</div><div class="scroll"><table><thead><tr><th>Token</th><th>Called</th><th>Entry</th><th>Score</th><th>5m</th><th>15m</th><th>1h</th></tr></thead><tbody id="historyRows"><tr><td colspan="7" class="empty">Loading history…</td></tr></tbody></table></div></section>
+<div class="hero"><small class="muted">CALL HISTORY</small><h1>Every logged call, with what actually happened</h1><p>Each row is a real qualified call at the moment it fired, with its price then, its price right now, and its measured return at fixed checkpoints — net of an assumed round-trip trading cost. Pending means the timeframe hasn't elapsed yet.</p></div>
+<section class="box"><div class="head">Recent calls</div><div class="scroll"><table><thead><tr><th>Token</th><th>Called</th><th>Entry price</th><th>Price now</th><th>Since call</th><th>Score</th><th>5m</th><th>15m</th><th>1h</th></tr></thead><tbody id="historyRows"><tr><td colspan="9" class="empty">Loading history…</td></tr></tbody></table></div></section>
 </section>
 
 <section id="risk" class="page">
@@ -102,7 +105,7 @@ a{color:var(--green);text-decoration:none}
 </section>
 
 <section id="market" class="page"><div class="two">
-<section class="card"><h1 style="font-size:19px">What the scanner looks at</h1><div class="statline"><span>Momentum</span><b>5m + 1h price change</b></div><div class="statline"><span>Flow</span><b>Buy / sell balance</b></div><div class="statline"><span>Liquidity</span><b>Can you actually exit</b></div><div class="statline"><span>Activity</span><b>Trade count + volume</b></div><div class="statline"><span>Risk gate</span><b>RugCheck + concentration</b></div><div class="statline"><span>Deployer history</span><b>Rug rate across this wallet's prior launches</b></div><div class="statline"><span>Social (optional)</span><b>X/Twitter mention volume + sentiment, corroborating only</b></div></section>
+<section class="card"><h1 style="font-size:19px">What the scanner looks at</h1><div class="statline"><span>Momentum</span><b>5m + 1h price change</b></div><div class="statline"><span>Flow</span><b>Buy / sell balance</b></div><div class="statline"><span>Liquidity</span><b>Can you actually exit</b></div><div class="statline"><span>Activity</span><b>Trade count + volume</b></div><div class="statline"><span>Risk gate</span><b>RugCheck score + rugged flag</b></div><div class="statline"><span>Holder concentration</span><b>How much of supply the top 10 wallets control</b></div><div class="statline"><span>Deployer history</span><b>Rug rate across this wallet's prior launches</b></div><div class="statline"><span>Bundle heuristic</span><b>Same-block buying at launch — a coarse proxy, not confirmed</b></div><div class="statline"><span>Social (optional)</span><b>X/Twitter mention volume + sentiment, corroborating only</b></div></section>
 <section class="card"><h1 style="font-size:19px">Honest limits</h1><p class="muted">A qualified setup is a rules-based research candidate, not a guarantee. Pump.fun tokens are frequently manipulated, and past patterns can stop working without warning.</p><p class="muted">Every qualified call is logged with its entry price, and its real 5m/15m/1h outcome is measured automatically — see the track record and score calibration on the Qualified tab.</p><p class="muted">Deployer history and social signal only ever adjust a score that already passed every other gate, or exclude a token outright for a proven serial-rug pattern — a clean deployer history or no social data never qualifies a token by itself.</p></section>
 </div></section>
 
@@ -126,7 +129,7 @@ a{color:var(--green);text-decoration:none}
   <section class="card" id="walletHoldingsCard" style="display:none;margin-top:14px">
     <small class="muted">HOLDINGS</small>
     <p class="muted" style="font-size:12px;margin:4px 0 10px">Optionally enter your own entry price per token (saved only in this browser) to see live P&L and whether the position has crossed this system's own profit-taking or invalidation levels. This manages the position as its own — it's still research, not an instruction to trade.</p>
-    <div class="scroll"><table><thead><tr><th>Token</th><th>Amount</th><th>Price</th><th>Value</th><th>Your entry</th><th>Position</th><th>Risk</th><th>Score</th></tr></thead><tbody id="walletRows"></tbody></table></div>
+    <div class="scroll"><table><thead><tr><th>Token</th><th>Amount</th><th>Price</th><th>Value</th><th>Your entry</th><th>Position</th><th>Safety</th><th>Score</th></tr></thead><tbody id="walletRows"></tbody></table></div>
     <p id="walletTruncNote" class="muted" style="display:none;margin-top:6px">Showing the top holdings by value; smaller dust balances are hidden.</p>
   </section>
 </section>
@@ -142,6 +145,22 @@ a{color:var(--green);text-decoration:none}
   // so clicking it matches what's shown.
   const isSerialRugger=t=>!!(t.creatorRep&&t.creatorRep.launches>=3&&t.creatorRep.rugRate>=50);
   const isQualified=t=>!!(t.quality&&t.signal?.score>=72&&t.pair&&Number(t.pair.liquidity?.usd)>=10000&&!(t.rug?.rugged||Number(t.rug?.scoreNormalized)>=45)&&!isSerialRugger(t));
+  // Plain-word safety badge instead of a raw 0-100 risk number — research on how real trading
+  // tools present safety consistently favors a traffic-light word (Safe/Caution/Danger) over a
+  // number nobody has a reference point for. The raw score is still available on hover for anyone
+  // who wants it.
+  function safetyLabel(t){
+    const s=Number(t.rug?.scoreNormalized);
+    if(t.rug?.rugged||isSerialRugger(t))return{text:"Danger",cls:"risk"};
+    if(!Number.isFinite(s))return{text:"Checking…",cls:""};
+    if(s>=45)return{text:"Danger",cls:"risk"};
+    if(s>=30)return{text:"Caution",cls:"warn"};
+    return{text:"Safe",cls:""};
+  }
+  function safetyBadge(t){
+    const l=safetyLabel(t),raw=t.rug?.scoreNormalized==null?"unknown":Math.round(t.rug.scoreNormalized)+"/100";
+    return '<span class="badge '+l.cls+'" title="Automated checks only — not a guarantee. Raw risk score: '+raw+'">'+l.text+'</span>';
+  }
   const esc=x=>String(x==null?"":x).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
   const money=x=>{x=Number(x);if(!Number.isFinite(x))return"—";if(x>=1e9)return"$"+(x/1e9).toFixed(2)+"B";if(x>=1e6)return"$"+(x/1e6).toFixed(2)+"M";if(x>=1e3)return"$"+(x/1e3).toFixed(1)+"K";return x>=1?"$"+x.toFixed(2):x?"$"+x.toPrecision(4):"—"};
   const pct=x=>{x=Number(x);return Number.isFinite(x)?(x>=0?"+":"")+x.toFixed(1)+"%":"—"};
@@ -183,11 +202,10 @@ a{color:var(--green);text-decoration:none}
     if($("qCard"))$("qCard").style.outline=qualifiedOnly?"2px solid var(--green)":"none";
     if($("radarFilterLabel"))$("radarFilterLabel").innerHTML=qualifiedOnly?'Showing qualified only <a href="#" id="clearQFilter" style="margin-left:6px">clear ×</a>':"Sorted by score";
     if($("rows"))$("rows").innerHTML=z.length?z.map(t=>{
-      const p=t.pair||{},r=t.rug||{},s=t.signal||{};
-      const riskClass=r.rugged||Number(r.scoreNormalized)>=45?"risk":Number(r.scoreNormalized)>=30?"warn":"";
+      const p=t.pair||{},s=t.signal||{};
       const scoreClass=Number(s.score)>=72?"":Number(s.score)>=62?"warn":"risk";
       const catClass=t.category==="RISK"?"risk":t.category==="EARLY"?"":"warn";
-      return '<tr class="coin-row" data-dex="'+esc(dex(t))+'"><td><div class="token-cell">'+avatar(t)+'<div><div class="token-name">'+esc(t.name||"Metadata pending")+'</div><div class="token-sub">'+esc(t.symbol||"—")+' <span class="tag '+catClass+'">'+esc(t.category||"—")+'</span></div></div></div></td><td>'+money(p.priceUsd)+'</td><td class="'+(Number(p.priceChange?.m5)>=0?"pos":"neg")+'">'+pct(p.priceChange?.m5)+'</td><td class="'+(Number(p.priceChange?.h1)>=0?"pos":"neg")+'">'+pct(p.priceChange?.h1)+'</td><td>'+money(p.liquidity?.usd)+'</td><td><span class="badge '+riskClass+'">'+(r.scoreNormalized==null?"CHECK":Math.round(r.scoreNormalized))+'</span></td><td><span class="badge '+scoreClass+'">'+(s.score??0)+'</span></td><td>'+sparkline(t.chart)+'</td></tr>';
+      return '<tr class="coin-row" data-dex="'+esc(dex(t))+'"><td><div class="token-cell">'+avatar(t)+'<div><div class="token-name">'+esc(t.name||"Metadata pending")+'</div><div class="token-sub">'+esc(t.symbol||"—")+' <span class="tag '+catClass+'">'+esc(t.category||"—")+'</span></div></div></div></td><td>'+money(p.priceUsd)+'</td><td class="'+(Number(p.priceChange?.m5)>=0?"pos":"neg")+'">'+pct(p.priceChange?.m5)+'</td><td class="'+(Number(p.priceChange?.h1)>=0?"pos":"neg")+'">'+pct(p.priceChange?.h1)+'</td><td>'+money(p.liquidity?.usd)+'</td><td>'+safetyBadge(t)+'</td><td><span class="badge '+scoreClass+'">'+(s.score??0)+'</span></td><td>'+sparkline(t.chart)+'</td></tr>';
     }).join(""):'<tr><td colspan="8" class="empty">Waiting for live market data…</td></tr>';
     $("n").textContent=all.length;
     $("r").textContent=all.filter(t=>t.rug&&(t.rug.rugged||Number(t.rug.scoreNormalized)>=45)).length;
@@ -255,7 +273,7 @@ a{color:var(--green);text-decoration:none}
       const c=await json("/api/calls");
       box.innerHTML=Array.isArray(c)&&c.length?c.map(t=>{
         const p=t.tradePlan||{},ex=p.exits||[];
-        const notes=[t.creatorNote,t.socialNote].filter(Boolean).map(n=>'<p class="muted" style="font-size:11.5px;margin:0 0 6px">'+esc(n)+'</p>').join("");
+        const notes=[t.creatorNote,t.holderNote,t.bundleNote,t.socialNote].filter(Boolean).map(n=>'<p class="muted" style="font-size:11.5px;margin:0 0 6px">'+esc(n)+'</p>').join("");
         return '<div class="call"><div class="call-head">'+avatar(t)+'<div><div class="title">'+esc(t.name||"—")+' · '+esc(t.symbol||"—")+'</div><small class="muted">'+esc(t.callType||"QUALIFIED")+'</small></div></div><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><div class="score">'+Number(t.signal?.score||0)+'/100</div>'+sparkline(t.chart,90,28)+'</div><p class="muted" style="font-size:12.5px;margin:0 0 8px">'+money(t.pair?.marketCap||t.pair?.fdv)+' MC · '+money(t.pair?.liquidity?.usd)+' liq</p><div class="statline"><span>Entry</span><b>'+(p.eligible?money(p.entry?.low)+" – "+money(p.entry?.high):"NO ENTRY")+'</b></div><div class="statline"><span>Invalidation</span><b>'+(p.invalidation?money(p.invalidation.price):"—")+'</b></div><div class="statline"><span>Profit ladder</span><b>'+ex.slice(0,3).map(x=>"+"+((Number(x.multiple)-1)*100).toFixed(0)+"%").join(" · ")+'</b></div>'+notes+'<a target="_blank" rel="noopener" href="'+esc(dex(t))+'" style="display:block;margin-top:8px">Open market →</a></div>';
       }).join(""):'<div class="card empty">No qualified opportunities right now — the scanner is intentionally allowed to make no call when gates aren\'t met.</div>';
       renderNearMiss(!Array.isArray(c)||!c.length);
@@ -292,16 +310,20 @@ a{color:var(--green);text-decoration:none}
       };
       box.innerHTML=Array.isArray(rows)&&rows.length?rows.map(r=>{
         const when=r.flagged_at?new Date(r.flagged_at).toLocaleString():"—";
-        return '<tr><td><b>'+esc(r.name||"—")+'</b> <small class="muted">'+esc(r.symbol||"")+'</small></td><td><small class="muted">'+esc(when)+'</small></td><td>'+money(r.entry_price)+'</td><td><span class="badge">'+(r.score??"—")+'</span></td><td>'+cell(r.resolved_5m,r.net_5m,r.resolved_5m_at)+'</td><td>'+cell(r.resolved_15m,r.net_15m,r.resolved_15m_at)+'</td><td>'+cell(r.resolved_1h,r.net_1h,r.resolved_1h_at)+'</td></tr>';
-      }).join(""):'<tr><td colspan="7" class="empty">No calls logged yet — check back once the scanner has flagged a few qualified tokens.</td></tr>';
-    }catch(e){console.error("history failed",e);box.innerHTML='<tr><td colspan="7" class="empty">History temporarily unavailable.</td></tr>'}
+        const since=r.liveChangePct!=null?'<span class="'+(r.liveChangePct>=0?"pos":"neg")+'">'+(r.liveChangePct>=0?"+":"")+r.liveChangePct.toFixed(1)+'%</span>':'<span class="muted">'+(r.stillTracked?"—":"no longer tracked")+'</span>';
+        return '<tr><td><b>'+esc(r.name||"—")+'</b> <small class="muted">'+esc(r.symbol||"")+'</small></td><td><small class="muted">'+esc(when)+'</small></td><td>'+money(r.entry_price)+'</td><td>'+(r.currentPrice!=null?money(r.currentPrice):'<span class="muted">—</span>')+'</td><td>'+since+'</td><td><span class="badge">'+(r.score??"—")+'</span></td><td>'+cell(r.resolved_5m,r.net_5m,r.resolved_5m_at)+'</td><td>'+cell(r.resolved_15m,r.net_15m,r.resolved_15m_at)+'</td><td>'+cell(r.resolved_1h,r.net_1h,r.resolved_1h_at)+'</td></tr>';
+      }).join(""):'<tr><td colspan="9" class="empty">No calls logged yet — check back once the scanner has flagged a few qualified tokens.</td></tr>';
+    }catch(e){console.error("history failed",e);box.innerHTML='<tr><td colspan="9" class="empty">History temporarily unavailable.</td></tr>'}
   }
 
   function loadRisk(){
     const z=[...M.values()].filter(t=>(t.rug&&(t.rug.rugged||Number(t.rug.scoreNormalized)>=30))||isSerialRugger(t)).sort((a,b)=>(b.rug?.scoreNormalized||0)-(a.rug?.scoreNormalized||0)).slice(0,30);
     $("riskGrid").innerHTML=z.map(t=>{
-      const creatorNote=isSerialRugger(t)?'<p class="muted" style="font-size:11.5px;color:var(--red)">'+esc(t.creatorRep.launches+' prior launches, '+t.creatorRep.rugRate+'% rugged')+'</p>':"";
-      return '<div class="call"><div class="call-head">'+avatar(t)+'<div><div class="title">'+esc(t.name||"—")+' · '+esc(t.symbol||"—")+'</div><small class="muted">'+esc(t.category||"RISK")+'</small></div></div><div class="score neg">'+Math.round(t.rug?.scoreNormalized||0)+'</div><p class="muted" style="font-size:12.5px">'+esc((t.signal?.reasons||[]).join(" · "))+'</p>'+creatorNote+'<a target="_blank" rel="noopener" href="https://rugcheck.xyz/tokens/'+encodeURIComponent(t.mint)+'">Open RugCheck →</a></div>';
+      const notes=[
+        isSerialRugger(t)?t.creatorRep.launches+' prior launches, '+t.creatorRep.rugRate+'% rugged':null,
+        t.rug&&t.rug.top10HolderPct!=null?'Top 10 wallets hold '+t.rug.top10HolderPct+'% of supply':null
+      ].filter(Boolean).map(n=>'<p class="muted" style="font-size:11.5px;color:var(--red)">'+esc(n)+'</p>').join("");
+      return '<div class="call"><div class="call-head">'+avatar(t)+'<div><div class="title">'+esc(t.name||"—")+' · '+esc(t.symbol||"—")+'</div><small class="muted">'+esc(t.category||"RISK")+'</small></div></div>'+safetyBadge(t)+'<p class="muted" style="font-size:12.5px;margin-top:8px">'+esc((t.signal?.reasons||[]).join(" · "))+'</p>'+notes+'<a target="_blank" rel="noopener" href="https://rugcheck.xyz/tokens/'+encodeURIComponent(t.mint)+'">Open RugCheck →</a></div>';
     }).join("")||'<div class="card empty">No elevated-risk tokens currently tracked.</div>';
   }
 
@@ -381,12 +403,11 @@ a{color:var(--green);text-decoration:none}
     $("walletTruncNote").style.display=d.holdingsTruncated?"":"none";
     const rows=d.holdings||[];
     $("walletRows").innerHTML=rows.length?rows.map(h=>{
-      const s=h.signal||{},r=h.rug||{};
-      const riskClass=r.rugged||Number(r.scoreNormalized)>=45?"risk":Number(r.scoreNormalized)>=30?"warn":"";
+      const s=h.signal||{};
       const scoreClass=Number(s.score)>=72?"":Number(s.score)>=62?"warn":"risk";
       const t={metadataImage:h.metadataImage,symbol:h.symbol,name:h.name};
       const cb=getCostBasis(d.address,h.mint);
-      return '<tr data-mint="'+esc(h.mint)+'"><td><div class="token-cell">'+avatar(t)+'<div><div class="token-name">'+esc(h.name||"Unknown token")+'</div><div class="token-sub">'+esc(h.symbol||"—")+'</div></div></div></td><td>'+(Number(h.uiAmount)?Number(h.uiAmount).toLocaleString(undefined,{maximumFractionDigits:4}):"—")+'</td><td>'+money(h.priceUsd)+'</td><td>'+money(h.valueUsd)+'</td><td><input class="cbInput" data-mint="'+esc(h.mint)+'" type="number" step="any" min="0" placeholder="price paid" value="'+(cb||"")+'" style="width:90px;padding:6px 7px;border-radius:7px;border:1px solid var(--line);background:#07110e;color:#fff;font-size:12px"></td><td style="font-size:12px">'+positionStatus(h,cb)+'</td><td>'+(r.scoreNormalized==null?'<span class="badge">CHECK</span>':'<span class="badge '+riskClass+'">'+Math.round(r.scoreNormalized)+'</span>')+'</td><td>'+(s.score==null?"—":'<span class="badge '+scoreClass+'">'+s.score+'</span>')+'</td></tr>';
+      return '<tr data-mint="'+esc(h.mint)+'"><td><div class="token-cell">'+avatar(t)+'<div><div class="token-name">'+esc(h.name||"Unknown token")+'</div><div class="token-sub">'+esc(h.symbol||"—")+'</div></div></div></td><td>'+(Number(h.uiAmount)?Number(h.uiAmount).toLocaleString(undefined,{maximumFractionDigits:4}):"—")+'</td><td>'+money(h.priceUsd)+'</td><td>'+money(h.valueUsd)+'</td><td><input class="cbInput" data-mint="'+esc(h.mint)+'" type="number" step="any" min="0" placeholder="price paid" value="'+(cb||"")+'" style="width:90px;padding:6px 7px;border-radius:7px;border:1px solid var(--line);background:#07110e;color:#fff;font-size:12px"></td><td style="font-size:12px">'+positionStatus(h,cb)+'</td><td>'+safetyBadge(h)+'</td><td>'+(s.score==null?"—":'<span class="badge '+scoreClass+'">'+s.score+'</span>')+'</td></tr>';
     }).join(""):'<tr><td colspan="8" class="empty">No SPL token holdings found for this address.</td></tr>';
     $("walletRows").querySelectorAll(".cbInput").forEach(inp=>{
       inp.onchange=()=>{ setCostBasis(d.address,inp.dataset.mint,inp.value); renderPortfolio(d); };
