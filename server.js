@@ -55,6 +55,8 @@ async function initDB() {
       );
       CREATE INDEX IF NOT EXISTS call_log_mint ON call_log(mint);
       CREATE INDEX IF NOT EXISTS call_log_flagged_at ON call_log(flagged_at);
+      ALTER TABLE call_log ADD COLUMN IF NOT EXISTS name TEXT;
+      ALTER TABLE call_log ADD COLUMN IF NOT EXISTS symbol TEXT;
     `);
     dbReady = true;
     console.log("Postgres learning store ready");
@@ -98,14 +100,30 @@ async function maybeLogCall(t) {
   loggedAt.set(t.mint, Date.now());
   try {
     await pool.query(
-      `INSERT INTO call_log(mint,call_type,score,risk,entry_price,market_cap,liquidity,volume_h1,buy_ratio,features)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      `INSERT INTO call_log(mint,call_type,score,risk,entry_price,market_cap,liquidity,volume_h1,buy_ratio,features,name,symbol)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [t.mint, t.signal?.score >= 82 ? "A-TIER WATCH" : t.signal?.score >= 74 ? "QUALIFIED WATCH" : "MOMENTUM WATCH",
        t.signal?.score ?? null, t.rug?.scoreNormalized ?? null, price, +p.marketCap || +p.fdv || null,
        +p.liquidity?.usd || null, +p.volume?.h1 || null, t.signal?.metrics?.buyRatio ?? null,
-       JSON.stringify(t.signal?.metrics || {})]
+       JSON.stringify(t.signal?.metrics || {}), t.name || null, t.symbol || null]
     );
   } catch (e) { console.error("call_log insert failed:", e.message); }
+}
+
+// Individual call history for the frontend "History" page — every logged call with its outcome
+// per timeframe so far (win/loss/pending), newest first.
+async function callHistory(limit = 60) {
+  if (!dbReady) return [];
+  try {
+    const r = await pool.query(
+      `SELECT mint, name, symbol, call_type, score, risk, entry_price, flagged_at,
+              resolved_5m, net_5m, resolved_5m_at, resolved_15m, net_15m, resolved_15m_at,
+              resolved_1h, net_1h, resolved_1h_at
+       FROM call_log ORDER BY flagged_at DESC LIMIT $1`,
+      [Math.min(200, Math.max(1, Number(limit) || 60))]
+    );
+    return r.rows;
+  } catch (e) { console.error("callHistory failed:", e.message); return []; }
 }
 
 // Finds the observation closest to `targetTs` within +/- toleranceMs, for a given mint.
@@ -204,17 +222,31 @@ async function getJSON(u, timeoutMs = 10000) {
 function scoreSignal(p, r, trend = {}) {
   const pc = +p?.priceChange?.m5 || 0, h = +p?.priceChange?.h1 || 0, b = +p?.txns?.h1?.buys || 0, s = +p?.txns?.h1?.sells || 0, l = +p?.liquidity?.usd || 0, v = +p?.volume?.h1 || 0, f = b + s ? b / (b + s) : .5, mc = +p?.marketCap || +p?.fdv || 0;
   const ageH = p?.pairCreatedAt ? Math.max(0, (Date.now() - p.pairCreatedAt) / 3600000) : 9999, vl = l > 0 ? v / l : 0, trades = b + s;
-  let x = 38 + pc * 1.05 + h * .20 + (f - .5) * 34 + Math.min(15, Math.log10(Math.max(1, l)) * 2.6) + Math.min(15, Math.log10(Math.max(1, v)) * 2.2) + Math.max(-8, Math.min(8, +trend.accel || 0));
+  // Fixed: pc/h (5m/1h % price change) were uncapped and linearly weighted. Fresh pump.fun
+  // tokens routinely swing +500%-+2000% in 5 minutes, so a single huge pump alone used to blow
+  // the score past 100 regardless of liquidity or risk — that's why unrelated tokens with wildly
+  // different safety profiles were all landing on the same saturated score of 100. Momentum
+  // contribution is now capped before weighting, so it still rewards momentum but stops letting
+  // one extreme number dominate everything else in the formula.
+  const pcC = Math.max(-40, Math.min(25, pc)), hC = Math.max(-80, Math.min(80, h));
+  let x = 38 + pcC * 1.05 + hC * .20 + (f - .5) * 34 + Math.min(15, Math.log10(Math.max(1, l)) * 2.6) + Math.min(15, Math.log10(Math.max(1, v)) * 2.2) + Math.max(-8, Math.min(8, +trend.accel || 0));
   if (ageH <= 1) x += 4; else if (ageH > 72) x -= 5;
   if (vl < 1) x -= 10; else if (vl > 8) x += 5;
   if (trades < 25) x -= 8;
   if (mc > 25000000) x -= 18; if (mc > 100000000) x -= 28;
+  // A 5m move beyond ~150% is a classic pump/wash-trade signature on this kind of market, not a
+  // trustworthy momentum signal. The penalty scales with severity (capped at -30) so a 2000% spike
+  // is punished far harder than one just over the threshold, and a genuinely extreme move nets
+  // NEGATIVE once combined with the capped upside above — it can no longer out-score a modest,
+  // healthy move the way an uncapped linear formula used to let it.
+  const manipulationFlag = pc > 150;
+  if (manipulationFlag) x -= Math.min(30, (pc - 150) * 0.05);
   if (r?.rugged) x -= 60; if (r?.scoreNormalized != null) x -= Math.min(45, r.scoreNormalized * .55);
   x = Math.max(0, Math.min(100, x));
   const label = x >= 82 ? "A-TIER WATCH" : x >= 72 ? "QUALIFIED WATCH" : x >= 62 ? "MOMENTUM WATCH" : "NO CALL";
   return {
     score: Math.round(x), label, side: x >= 72 ? "WATCH" : "WAIT", reasons: [
-      pc > 4 ? "5m momentum positive" : pc < -5 ? "5m momentum weak" : null,
+      manipulationFlag ? "extreme 5m move — possible manipulation" : pc > 4 ? "5m momentum positive" : pc < -5 ? "5m momentum weak" : null,
       h > 10 ? "1h trend strong" : h < -10 ? "1h trend weak" : null,
       f > .60 ? "buyers dominate" : f < .40 ? "sellers dominate" : null,
       l >= 25000 ? "liquidity has depth" : l < 10000 ? "thin liquidity" : null,
@@ -222,7 +254,7 @@ function scoreSignal(p, r, trend = {}) {
       ageH <= 24 ? "fresh market" : ageH > 72 ? "older pair" : null,
       mc > 25000000 ? "large-cap penalty" : mc > 0 && mc < 5000000 ? "small-cap room" : null,
       r?.rugged ? "rug flag" : r?.scoreNormalized >= 45 ? "elevated safety risk" : null
-    ].filter(Boolean).slice(0, 5), metrics: { ageHours: ageH, volumeLiquidity: vl, buyRatio: f, marketCap: mc, trades }
+    ].filter(Boolean).slice(0, 5), metrics: { ageHours: ageH, volumeLiquidity: vl, buyRatio: f, marketCap: mc, trades, manipulationFlag }
   };
 }
 
@@ -463,6 +495,7 @@ http.createServer(async (req, res) => {
   if (u.pathname === "/api/calls") return send(res, 200, getCalls().map(t => ({ ...t, tradePlan: tradePlan(t) })));
   if (u.pathname === "/api/plan") { const t = findToken(u.searchParams.get("q") || u.searchParams.get("mint") || ""); return send(res, 200, t ? { token: { mint: t.mint, name: t.name, symbol: t.symbol }, plan: tradePlan(t) } : { error: "Token not found" }); }
   if (u.pathname === "/api/performance") { const perf = await performanceStats(); return send(res, 200, perf || { error: "not available" }); }
+  if (u.pathname === "/api/call-history") { return send(res, 200, await callHistory(u.searchParams.get("limit"))); }
   if (u.pathname === "/api/wallet") {
     const ip = clientIp(req);
     if (rateLimited(ip, AGENT_RATE_LIMIT_PER_MIN)) return send(res, 429, { error: "rate limited, try again shortly" });
