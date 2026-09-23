@@ -159,7 +159,11 @@ th.tip:hover::after{top:150%}
     <div class="statline"><span>Money per trade</span><b id="abMaxPerTrade">—</b></div>
     <div class="statline"><span>Most it'll hold at once</span><b id="abMaxPositions">—</b></div>
     <div class="statline"><span>Minimum score to buy</span><b id="abMinScore">—</b></div>
+    <div class="statline"><span class="tip" data-tip="If a coin drops this much below what the bot paid, it sells everything to limit the loss. Once it has taken some profit, this safety line moves up (first to break-even) so a winner can't turn into a loss.">Sells to cut a loss at</span><b id="abStopLine">—</b></div>
+    <div class="statline"><span class="tip" data-tip="As a coin rises, the bot sells a slice of the original position at each step and keeps the last slice riding in case it keeps going.">Takes profit at</span><b id="abTpLine">—</b></div>
+    <div class="statline"><span class="tip" data-tip="Memecoins often fade. If a position hasn't hit its targets by then, the bot sells it and moves on.">Longest it holds a coin</span><b id="abHoldLine">—</b></div>
     <div class="statline"><span>Stops buying for the day if it loses</span><b id="abDailyLossCapLine">—</b></div>
+    <div class="statline"><span class="tip" data-tip="What happened the last time the bot looked for something to buy.">Last check</span><b id="abLastCheck" style="text-align:right">—</b></div>
     <div class="statline"><span class="tip" data-tip="The app regularly asks the trading service for a real price quote, and once a wallet is added, has it prepare a practice trade that is never signed or sent. No money is used.">Trading connection</span><b id="abRoute">—</b></div>
     <div id="abConfigNotes"></div>
     <p class="muted" style="font-size:11.5px;margin-top:10px">These are set in Railway, not on this page, so they can be tuned without a code change. <span class="tip" data-tip="No. It always uses the same fixed rules — the same score and safety checks as the rest of the site. It keeps a permanent record of every trade so you can see whether the rules actually work over time, but nothing here automatically changes its own behavior based on results.">Does it get smarter over time? →</span></p>
@@ -544,7 +548,11 @@ th.tip:hover::after{top:150%}
     $("abOpenCount").textContent=(d.openPositions||[]).length+" of "+d.maxConcurrentPositions+" max";
     $("abMaxPerTrade").textContent=d.maxSolPerTrade+" SOL";
     $("abMaxPositions").textContent=d.maxConcurrentPositions+" coins at once";
-    $("abMinScore").textContent=d.minScore+" / 100";
+    $("abMinScore").textContent=d.minScore+" / 100"+(d.minScoreOffset>0?" (auto-raised +"+d.minScoreOffset+" after a losing streak)":"");
+    $("abStopLine").textContent=d.stopLossPct!=null?"-"+d.stopLossPct+"% from what it paid":"—";
+    $("abTpLine").textContent=(d.tpLadder||[]).map(x=>"+"+x.gainPct+"%").join(", ")+((d.tpLadder||[]).length?" ("+d.tpLadder[0].sellPct+"% each)":"");
+    $("abHoldLine").textContent=d.maxHoldMinutes!=null?(d.maxHoldMinutes>=60?(d.maxHoldMinutes/60)+" hours":d.maxHoldMinutes+" min"):"—";
+    $("abLastCheck").textContent=d.live?(d.lastCheck||"—"):"bot is off";
     $("abDailyLossCapLine").textContent=d.dailyLossCapSol+" SOL";
     const rc=d.routeCheck||{};
     $("abRoute").innerHTML=rc.ok===true?'<span class="pos">Working'+(rc.swapBuildOk?' (practice trade built)':' (price check only — add the wallet to test a full trade)')+'</span>':rc.ok===false?'<span class="neg">Not working</span>':'<span class="muted">Checking…</span>';
