@@ -287,11 +287,14 @@ async function sendTelegramText(text) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 8000);
   try {
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    const r = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: "POST", headers: { "content-type": "application/json" }, signal: ctrl.signal,
       body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: String(text).slice(0, 4000), disable_web_page_preview: true })
     });
-  } catch (e) { console.error("Telegram alert failed:", e.message); } finally { clearTimeout(timer); }
+    // fetch doesn't throw on HTTP errors, so a wrong chat ID or revoked token used to fail silently.
+    if (!r.ok) { const j = await r.json().catch(() => ({})); console.error("Telegram alert rejected:", r.status, j.description || ""); return false; }
+    return true;
+  } catch (e) { console.error("Telegram alert failed:", e.message); return false; } finally { clearTimeout(timer); }
 }
 
 // Every autobot buy/sell/fault goes to Telegram (when configured) regardless of TELEGRAM_MIN_SCORE —
@@ -1549,6 +1552,9 @@ setInterval(() => pruneOldObservations().catch(e => console.error("pruneOldObser
 setInterval(() => autotradeCycle(), AUTOTRADE_LOOP_INTERVAL_MS);
 
 initDB().then(hydrateAutotradeHeldMints).catch(() => {});
+// Doubles as a restart notice and an end-to-end check that the token and chat ID actually work.
+if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) sendTelegramText("✅ PumpScope started — alerts are on. You'll get a message here for strong picks and for everything the autobot does.")
+  .then(ok => console.log(ok ? "Telegram alerts connected" : "Telegram alerts NOT working — check TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID"));
 bootstrapDex();
 
 http.createServer(async (req, res) => {
