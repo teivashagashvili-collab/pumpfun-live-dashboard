@@ -535,6 +535,7 @@ th.tip:hover::after{top:150%}
     if(!d.live)return{text:"Off",cls:"off",sub:"Wallet is ready, but AUTOTRADE_ENABLED isn't turned on yet."};
     if(d.faulted)return{text:"Stopped — check needed",cls:"risk",sub:"A trade went through but couldn't be recorded. Check the Railway logs, then press Resume."};
     if(d.halted)return{text:"Paused",cls:"warn",sub:"Not buying anything new. Still watching what it already owns."};
+    if(d.mode==="paper")return{text:"Practice mode",cls:"warn",sub:"Trading on live prices with pretend money. No real SOL is used."};
     return{text:"Live",cls:"",sub:"Actively buying and selling on its own, right now."};
   }
 
@@ -542,7 +543,7 @@ th.tip:hover::after{top:150%}
     $("autobotSetup").style.display=d.configured?"none":"";
     const st=abStatusInfo(d);
     $("abStatus").innerHTML='<span class="badge '+st.cls+'">'+esc(st.text)+'</span><div class="muted" style="font-size:11.5px;margin-top:6px">'+esc(st.sub)+'</div>';
-    $("abBalance").textContent=d.solBalance!=null?Number(d.solBalance).toFixed(4)+" SOL":"—";
+    $("abBalance").textContent=d.solBalance!=null?Number(d.solBalance).toFixed(4)+" SOL"+(d.mode==="paper"?" (practice)":""):"—";
     $("abPnl").textContent=d.realizedPnlTodaySol!=null?(d.realizedPnlTodaySol>=0?"+":"")+Number(d.realizedPnlTodaySol).toFixed(4)+" SOL (limit: -"+d.dailyLossCapSol+")":"—";
     $("abPnl").className="value "+(d.realizedPnlTodaySol>0?"pos":d.realizedPnlTodaySol<0?"neg":"");
     $("abOpenCount").textContent=(d.openPositions||[]).length+" of "+d.maxConcurrentPositions+" max";
@@ -561,7 +562,7 @@ th.tip:hover::after{top:150%}
     if(d.configured&&d.usingDefaultRpc)notes.push("Using Solana's free public connection, which is rate-limited and can make trades fail or lag. Before trading for real, set SOLANA_RPC_URL in Railway to a dedicated provider (e.g. Helius or QuickNode — both have free tiers).");
     if(!d.alertsConfigured)notes.push("Phone alerts are off. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in Railway to get a message every time it buys, sells, pauses, or hits its loss limit.");
     $("abConfigNotes").innerHTML=notes.map(n=>'<div class="notice" style="margin:10px 0 0">'+esc(n)+'</div>').join("");
-    $("abWalletAddr").textContent=d.walletAddress||"Not set up yet.";
+    $("abWalletAddr").textContent=d.walletAddress?(d.walletAddress+(d.realSolBalance!=null?" · real balance "+Number(d.realSolBalance).toFixed(4)+" SOL":"")):"Not set up yet.";
     const pos=d.openPositions||[];
     $("abPositionRows").innerHTML=pos.length?pos.map(p=>{
       const chg=p.unrealizedChangePct;

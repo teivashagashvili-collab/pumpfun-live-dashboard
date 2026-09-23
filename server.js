@@ -1,7 +1,7 @@
 const http = require("http"), fs = require("fs"), path = require("path"), crypto = require("crypto"), WebSocket = require("ws");
 const { URL } = require("url");
 const { Pool } = require("pg");
-const { Connection, Keypair, VersionedTransaction } = require("@solana/web3.js");
+const { Connection, Keypair, VersionedTransaction, Transaction, TransactionInstruction, PublicKey } = require("@solana/web3.js");
 const bs58 = require("bs58").default;
 
 const PORT = Number(process.env.PORT || 8787);
@@ -46,6 +46,18 @@ const AUTOTRADE_REBUY_COOLDOWN_HOURS = Number(process.env.AUTOTRADE_REBUY_COOLDO
 const AUTOTRADE_MIN_SOL_RESERVE = Number(process.env.AUTOTRADE_MIN_SOL_RESERVE || 0.015); // kept back for fees + token-account rent
 const AUTOTRADE_MAX_SCORE_OFFSET = Number(process.env.AUTOTRADE_MAX_SCORE_OFFSET || 10);
 const AUTOTRADE_TP_SLIPPAGE_BPS = Number(process.env.AUTOTRADE_TP_SLIPPAGE_BPS || 500);
+// Paper mode: same decisions on live data and real Jupiter quotes, no transactions sent. Positions,
+// trades and state are kept apart from live ones (mode column / state row 2).
+const AUTOTRADE_MODE = String(process.env.AUTOTRADE_MODE || "live").toLowerCase() === "paper" ? "paper" : "live";
+const PAPER = AUTOTRADE_MODE === "paper";
+const AUTOTRADE_STATE_ID = PAPER ? 2 : 1;
+const AUTOTRADE_PAPER_START_SOL = Number(process.env.AUTOTRADE_PAPER_START_SOL || 1);
+// Paper fills are made slightly worse than the quote, to cover what a quote can't see: fill
+// latency and priority fees. Keeps paper results from flattering the strategy.
+const PAPER_FILL_HAIRCUT = 0.01, PAPER_TX_FEE_SOL = 0.0002;
+// Paper mode trades everything the scanner qualifies by default (the entry features are stored on
+// every position), so practice runs measure which filters actually help instead of pre-assuming it.
+const AUTOTRADE_PAPER_FILTERS = String(process.env.AUTOTRADE_PAPER_FILTERS || "false").toLowerCase() === "true";
 // Entry filters, added after the first live trades: the losers were a 4-minute-old token with no
 // RugCheck data (rugged -89%) and buys right after an 18% five-minute spike (reversed immediately).
 const AUTOTRADE_REQUIRE_SAFETY_DATA = String(process.env.AUTOTRADE_REQUIRE_SAFETY_DATA || "true").toLowerCase() !== "false";
@@ -153,6 +165,11 @@ async function initDB() {
       INSERT INTO autotrade_state(id) VALUES (1) ON CONFLICT (id) DO NOTHING;
       ALTER TABLE autotrade_positions ADD COLUMN IF NOT EXISTS entry_features JSONB;
       ALTER TABLE autotrade_positions ADD COLUMN IF NOT EXISTS entry_exit_value_sol NUMERIC;
+      ALTER TABLE autotrade_positions ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'live';
+      ALTER TABLE autotrade_trades ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'live';
+      ALTER TABLE autotrade_state DROP CONSTRAINT IF EXISTS autotrade_state_id_check;
+      ALTER TABLE autotrade_state ADD COLUMN IF NOT EXISTS paper_balance_sol NUMERIC;
+      INSERT INTO autotrade_state(id) VALUES (2) ON CONFLICT (id) DO NOTHING;
       ALTER TABLE autotrade_state ADD COLUMN IF NOT EXISTS min_score_offset NUMERIC NOT NULL DEFAULT 0;
       ALTER TABLE autotrade_state ADD COLUMN IF NOT EXISTS reviewed_closed_count INT NOT NULL DEFAULT 0;
     `);
@@ -325,7 +342,7 @@ async function sendTelegramText(text) {
 // Every autobot buy/sell/fault goes to Telegram (when configured) regardless of TELEGRAM_MIN_SCORE —
 // this is a record of real money moving, not a research alert. Fire-and-forget so a slow Telegram
 // API never delays trade bookkeeping.
-function notifyAutotrade(text) { sendTelegramText(text).catch(() => {}); }
+function notifyAutotrade(text) { if (PAPER && !String(text).startsWith("📝")) return; sendTelegramText(text).catch(() => {}); }
 
 // ---- call logging: every token that crosses the qualification bar gets a timestamped record ----
 const loggedAt = new Map(); // mint -> last logged timestamp (in-process cooldown so we don't spam duplicate rows)
@@ -1258,6 +1275,7 @@ async function executeSwap(inputMint, outputMint, amountRaw, slippageBps) {
   if (!kp) throw Error("autotrade wallet not configured");
   const quote = await jupiterQuote(inputMint, outputMint, amountRaw, slippageBps);
   if (!quote || quote.error || !quote.outAmount) throw Error("no swap route available for this token right now");
+  if (PAPER) return await paperFill(inputMint, amountRaw, quote);
   const { swapTransaction, lastValidBlockHeight } = await jupiterSwapTransaction(quote, kp.publicKey.toBase58());
   const tx = VersionedTransaction.deserialize(Buffer.from(swapTransaction, "base64"));
   tx.sign([kp]);
@@ -1276,32 +1294,32 @@ async function executeSwap(inputMint, outputMint, amountRaw, slippageBps) {
 async function getAutotradeState() {
   if (!dbReady) return { halted: false, dayKey: "", realizedPnlTodaySol: 0, minScoreOffset: 0 };
   const today = new Date().toISOString().slice(0, 10);
-  const r = await pool.query("SELECT halted, day_key, realized_pnl_today_sol, min_score_offset FROM autotrade_state WHERE id=1");
+  const r = await pool.query("SELECT halted, day_key, realized_pnl_today_sol, min_score_offset FROM autotrade_state WHERE id=" + AUTOTRADE_STATE_ID);
   const row = r.rows[0];
   if (!row) return { halted: false, dayKey: today, realizedPnlTodaySol: 0, minScoreOffset: 0 };
   const minScoreOffset = +row.min_score_offset || 0;
-  if (row.day_key !== today) { await pool.query("UPDATE autotrade_state SET day_key=$1, realized_pnl_today_sol=0 WHERE id=1", [today]); return { halted: row.halted, dayKey: today, realizedPnlTodaySol: 0, minScoreOffset }; }
+  if (row.day_key !== today) { await pool.query("UPDATE autotrade_state SET day_key=$1, realized_pnl_today_sol=0 WHERE id=" + AUTOTRADE_STATE_ID, [today]); return { halted: row.halted, dayKey: today, realizedPnlTodaySol: 0, minScoreOffset }; }
   return { halted: row.halted, dayKey: row.day_key, realizedPnlTodaySol: +row.realized_pnl_today_sol, minScoreOffset };
 }
 
-async function setAutotradeHalted(halted) { if (dbReady) await pool.query("UPDATE autotrade_state SET halted=$1 WHERE id=1", [halted]); }
+async function setAutotradeHalted(halted) { if (dbReady) await pool.query("UPDATE autotrade_state SET halted=$1 WHERE id=" + AUTOTRADE_STATE_ID, [halted]); }
 
 async function addRealizedPnlToday(deltaSol, db = pool) {
   if (!dbReady) return;
   const today = new Date().toISOString().slice(0, 10);
-  await db.query(`UPDATE autotrade_state SET realized_pnl_today_sol = CASE WHEN day_key=$1 THEN realized_pnl_today_sol + $2 ELSE $2 END, day_key=$1 WHERE id=1`, [today, deltaSol]);
+  await db.query(`UPDATE autotrade_state SET realized_pnl_today_sol = CASE WHEN day_key=$1 THEN realized_pnl_today_sol + $2 ELSE $2 END, day_key=$1 WHERE id=${AUTOTRADE_STATE_ID}`, [today, deltaSol]);
 }
 
 async function getOpenAutotradePositions() {
   if (!dbReady) return [];
-  const r = await pool.query("SELECT * FROM autotrade_positions WHERE status='open' ORDER BY opened_at ASC");
+  const r = await pool.query("SELECT * FROM autotrade_positions WHERE status='open' AND mode=$1 ORDER BY opened_at ASC", [AUTOTRADE_MODE]);
   return r.rows;
 }
 
 async function recordAutotradeTrade(positionId, mint, symbol, side, solAmount, priceUsd, signature, reason, db = pool) {
   if (!dbReady) return;
-  await db.query(`INSERT INTO autotrade_trades(position_id,mint,symbol,side,sol_amount,price_usd,tx_signature,reason) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
-    [positionId, mint, symbol || null, side, solAmount, priceUsd || null, signature || null, reason || null]);
+  await db.query(`INSERT INTO autotrade_trades(position_id,mint,symbol,side,sol_amount,price_usd,tx_signature,reason,mode) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [positionId, mint, symbol || null, side, solAmount, priceUsd || null, signature || null, reason || null, AUTOTRADE_MODE]);
 }
 
 // The swap is real and irreversible the moment it confirms; the DB write after it is not. A
@@ -1336,13 +1354,78 @@ async function faultAutotrade(detail) {
   notifyAutotrade("⚠️ Autobot FAULT — stopped buying. " + detail);
 }
 
+async function paperBalanceSol() {
+  const r = await pool.query("SELECT paper_balance_sol FROM autotrade_state WHERE id=2");
+  let b = r.rows[0]?.paper_balance_sol;
+  if (b == null) { b = AUTOTRADE_PAPER_START_SOL; await pool.query("UPDATE autotrade_state SET paper_balance_sol=$1 WHERE id=2", [b]); }
+  return Number(b);
+}
+// A paper trade fills at the real Jupiter quote minus a haircut, with the tx fee folded in (fewer
+// tokens on a buy, less SOL on a sell), so realized P&L and the paper balance stay consistent.
+async function paperFill(inputMint, amountRaw, quote) {
+  const buying = inputMint === SOL_MINT, q = Number(quote.outAmount) * (1 - PAPER_FILL_HAIRCUT);
+  const out = Math.max(0, Math.floor(buying ? q * (1 - PAPER_TX_FEE_SOL / (amountRaw / 1e9)) : q - PAPER_TX_FEE_SOL * 1e9));
+  const bal = await paperBalanceSol();
+  await pool.query("UPDATE autotrade_state SET paper_balance_sol=$1 WHERE id=2", [buying ? bal - amountRaw / 1e9 : bal + out / 1e9]);
+  return { signature: "paper-" + Date.now().toString(36), quote: { ...quote, outAmount: String(out) } };
+}
+
+// Every token the bot buys gets its own token account, which locks ~0.002 SOL of rent (4% of a
+// 0.05 SOL trade) until the account is closed. Swaps never close it, so after selling out we close
+// empty accounts to get the rent back. Only zero-balance accounts are ever touched.
+async function closeTokenAccounts(accounts) {
+  const kp = loadAutotradeKeypair(); if (!kp || !accounts.length) return 0;
+  const conn = solanaConnection();
+  let closed = 0;
+  for (let i = 0; i < accounts.length; i += 8) {
+    const batch = accounts.slice(i, i + 8);
+    const send = async list => {
+      const tx = new Transaction();
+      for (const a of list) tx.add(new TransactionInstruction({ programId: new PublicKey(a.program), data: Buffer.from([9]),
+        keys: [{ pubkey: new PublicKey(a.pubkey), isSigner: false, isWritable: true }, { pubkey: kp.publicKey, isSigner: false, isWritable: true }, { pubkey: kp.publicKey, isSigner: true, isWritable: false }] }));
+      const { blockhash, lastValidBlockHeight } = await conn.getLatestBlockhash("confirmed");
+      tx.recentBlockhash = blockhash; tx.feePayer = kp.publicKey; tx.sign(kp);
+      const sig = await conn.sendRawTransaction(tx.serialize());
+      const c = await conn.confirmTransaction({ signature: sig, blockhash, lastValidBlockHeight }, "confirmed");
+      if (c.value.err) throw Error("close failed on-chain");
+      return list.length;
+    };
+    try { closed += await send(batch); }
+    catch { for (const a of batch) { try { closed += await send([a]); } catch (e) { console.error("close token account failed", a.pubkey, e.message); } } }
+  }
+  return closed;
+}
+async function emptyTokenAccounts(owner, mint) {
+  const out = [];
+  for (const programId of [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]) {
+    const res = await rpcCall("getTokenAccountsByOwner", [owner, mint ? { mint } : { programId }, { encoding: "jsonParsed", commitment: "confirmed" }]);
+    for (const a of (res?.value || [])) {
+      if (Number(a?.account?.data?.parsed?.info?.tokenAmount?.amount || 0) === 0) out.push({ pubkey: a.pubkey, program: a.account.owner, mint: a.account.data.parsed.info.mint });
+    }
+    if (mint) break; // a mint filter already spans both programs
+  }
+  return out;
+}
+async function reclaimTokenAccountRent(mint = null) {
+  const kp = loadAutotradeKeypair(); if (!kp) return 0;
+  const empties = await emptyTokenAccounts(kp.publicKey.toBase58(), mint);
+  const n = await closeTokenAccounts(empties);
+  if (n) console.log("Reclaimed rent from " + n + " empty token account(s)" + (mint ? " for " + mint : ""));
+  return n;
+}
+
 async function walletTokenBalanceRaw(owner, mint) {
+  if (PAPER) {
+    const r = await pool.query("SELECT COALESCE(SUM(remaining_token_amount_raw),0) n FROM autotrade_positions WHERE mode='paper' AND status='open' AND mint=$1", [mint]);
+    return Number(r.rows[0].n);
+  }
   const res = await rpcCall("getTokenAccountsByOwner", [owner, { mint }, { encoding: "jsonParsed", commitment: "confirmed" }]);
   let total = 0;
   for (const acc of (res?.value || [])) total += Number(acc?.account?.data?.parsed?.info?.tokenAmount?.amount || 0);
   return total;
 }
 async function walletSolBalance(owner) {
+  if (PAPER) return await paperBalanceSol();
   const r = await rpcCall("getBalance", [owner, { commitment: "confirmed" }]);
   return (r?.value || 0) / 1e9;
 }
@@ -1360,6 +1443,7 @@ const positionMarks = new Map(); // position id -> { mult, source, at } — last
 
 // Why a candidate that scores high enough still isn't bought (null = OK to buy).
 function entryFilterReason(t) {
+  if (PAPER && !AUTOTRADE_PAPER_FILTERS) return null;
   const p = t.pair || {};
   if (AUTOTRADE_REQUIRE_SAFETY_DATA && (t.rug?.scoreNormalized == null || t.rug?.top10HolderPct == null)) return "no safety data yet";
   const ageMin = p.pairCreatedAt ? (Date.now() - p.pairCreatedAt) / 60000 : null;
@@ -1401,7 +1485,7 @@ async function openAutotradePosition(t) {
   autotradeHeldMints.add(t.mint);
   // Record what actually landed in the wallet, not Jupiter's quoted estimate: slippage can make the
   // real amount lower, and every later sell of the quoted amount would then fail.
-  let received = 0;
+  let received = PAPER ? Number(quote.outAmount) : 0;
   for (let i = 0; i < 4 && !received; i++) {
     try { received = await walletTokenBalanceRaw(owner, t.mint); } catch {}
     if (!received) await sleep(1500);
@@ -1412,9 +1496,9 @@ async function openAutotradePosition(t) {
   try {
     await dbRetry(() => dbTx(async c => {
       const r = await c.query(
-        `INSERT INTO autotrade_positions(mint,name,symbol,sol_spent,token_amount_raw,remaining_token_amount_raw,entry_price_usd,invalidation_price_usd,entry_features,entry_exit_value_sol)
-         VALUES($1,$2,$3,$4,$5,$5,$6,$7,$8,$9) RETURNING id`,
-        [t.mint, t.name || null, t.symbol || null, AUTOTRADE_MAX_SOL_PER_TRADE, tokenRaw, priceUsd, priceUsd ? priceUsd * (1 - AUTOTRADE_STOP_LOSS_PCT / 100) : null, JSON.stringify(features), exitVal]
+        `INSERT INTO autotrade_positions(mint,name,symbol,sol_spent,token_amount_raw,remaining_token_amount_raw,entry_price_usd,invalidation_price_usd,entry_features,entry_exit_value_sol,mode)
+         VALUES($1,$2,$3,$4,$5,$5,$6,$7,$8,$9,$10) RETURNING id`,
+        [t.mint, t.name || null, t.symbol || null, AUTOTRADE_MAX_SOL_PER_TRADE, tokenRaw, priceUsd, priceUsd ? priceUsd * (1 - AUTOTRADE_STOP_LOSS_PCT / 100) : null, JSON.stringify(features), exitVal, AUTOTRADE_MODE]
       );
       await recordAutotradeTrade(r.rows[0].id, t.mint, t.symbol, "buy", AUTOTRADE_MAX_SOL_PER_TRADE, priceUsd, signature, "opened: score " + t.signal.score + "/100", c);
     }));
@@ -1464,6 +1548,7 @@ async function closeAutotradePosition(pos, reason, urgent = false) {
     return;
   }
   autotradeHeldMints.delete(pos.mint);
+  if (!PAPER) { try { await reclaimTokenAccountRent(pos.mint); } catch (e) { console.error("rent reclaim failed", pos.mint, e.message); } }
   logAutotradeResult(pos, realizedTotal, pnl, finalReason);
   console.log("Autotrade CLOSE", pos.symbol || pos.mint, "pnl", pnl.toFixed(4), "SOL —", finalReason);
   notifyAutotrade((pnl >= 0 ? "✅" : "🔻") + " Autobot closed " + sanitizeForPrompt(pos.symbol || pos.mint, 20) + ": " + (pnl >= 0 ? "+" : "") + pnl.toFixed(4) + " SOL (" + finalReason + ")." + (s.signature ? "\nhttps://solscan.io/tx/" + s.signature : ""));
@@ -1501,6 +1586,7 @@ async function partialExitAutotradePosition(pos, tier) {
   notifyAutotrade("💰 Autobot took profit on " + sanitizeForPrompt(pos.symbol || pos.mint, 20) + " at " + reason.replace("take-profit ", "") + ": sold " + step.sellPct + "% of the position for " + s.solOut.toFixed(4) + " SOL.\nhttps://solscan.io/tx/" + s.signature);
   if (newRemaining <= 0) {
     autotradeHeldMints.delete(pos.mint);
+    if (!PAPER) { try { await reclaimTokenAccountRent(pos.mint); } catch (e) { console.error("rent reclaim failed", pos.mint, e.message); } }
     logAutotradeResult(pos, realizedTotal, pnl, reason + " (fully sold)", exitsTaken);
     await reviewStrictness();
   }
@@ -1555,20 +1641,24 @@ const REVIEW_WINDOW = 10;
 async function reviewStrictness() {
   if (!dbReady) return;
   try {
-    const st = (await pool.query("SELECT min_score_offset, reviewed_closed_count FROM autotrade_state WHERE id=1")).rows[0];
+    const st = (await pool.query("SELECT min_score_offset, reviewed_closed_count FROM autotrade_state WHERE id=" + AUTOTRADE_STATE_ID)).rows[0];
     if (!st) return;
-    const closed = (await pool.query("SELECT COUNT(*)::int n FROM autotrade_positions WHERE status='closed' AND realized_pnl_sol IS NOT NULL")).rows[0].n;
+    const closed = (await pool.query("SELECT COUNT(*)::int n FROM autotrade_positions WHERE status='closed' AND realized_pnl_sol IS NOT NULL AND mode=$1", [AUTOTRADE_MODE])).rows[0].n;
     if (closed - Number(st.reviewed_closed_count) < REVIEW_WINDOW) return;
-    const last = (await pool.query("SELECT realized_pnl_sol FROM autotrade_positions WHERE status='closed' AND realized_pnl_sol IS NOT NULL ORDER BY closed_at DESC LIMIT $1", [REVIEW_WINDOW])).rows;
+    const last = (await pool.query("SELECT realized_pnl_sol, sol_spent FROM autotrade_positions WHERE status='closed' AND realized_pnl_sol IS NOT NULL AND mode=$2 ORDER BY closed_at DESC LIMIT $1", [REVIEW_WINDOW, AUTOTRADE_MODE])).rows;
     const wins = last.filter(r => Number(r.realized_pnl_sol) > 0).length;
     const winRate = wins / last.length;
     const before = Number(st.min_score_offset) || 0;
     let offset = before;
     if (winRate < 0.4) offset = Math.min(AUTOTRADE_MAX_SCORE_OFFSET, offset + 2);
     else if (winRate >= 0.6) offset = Math.max(0, offset - 1);
-    await pool.query("UPDATE autotrade_state SET min_score_offset=$1, reviewed_closed_count=$2 WHERE id=1", [offset, closed]);
+    await pool.query("UPDATE autotrade_state SET min_score_offset=$1, reviewed_closed_count=$2 WHERE id=" + AUTOTRADE_STATE_ID, [offset, closed]);
     console.log("AUTOTRADE_REVIEW " + JSON.stringify({ window: last.length, wins, winRate, offsetBefore: before, offsetAfter: offset, minScore: AUTOTRADE_MIN_SCORE + offset }));
-    if (offset !== before) notifyAutotrade("🎯 Autobot review of its last " + last.length + " trades: " + wins + " made money. Minimum score to buy is now " + (AUTOTRADE_MIN_SCORE + offset) + " (was " + (AUTOTRADE_MIN_SCORE + before) + ").");
+    if (PAPER) {
+      const tot = (await pool.query("SELECT COUNT(*)::int n, COUNT(*) FILTER (WHERE realized_pnl_sol > 0)::int w, COALESCE(SUM(realized_pnl_sol),0) pnl FROM autotrade_positions WHERE mode='paper' AND status='closed'")).rows[0];
+      const avgPct = last.reduce((a, r) => a + Number(r.realized_pnl_sol) / Number(r.sol_spent), 0) / last.length * 100;
+      notifyAutotrade("📝 Paper trading update: " + tot.n + " practice trades so far, " + tot.w + " made money, total " + (Number(tot.pnl) >= 0 ? "+" : "") + Number(tot.pnl).toFixed(4) + " SOL. Last " + last.length + ": " + wins + " winners, average " + (avgPct >= 0 ? "+" : "") + avgPct.toFixed(1) + "% per trade. Minimum score now " + (AUTOTRADE_MIN_SCORE + offset) + ".");
+    } else if (offset !== before) notifyAutotrade("🎯 Autobot review of its last " + last.length + " trades: " + wins + " made money. Minimum score to buy is now " + (AUTOTRADE_MIN_SCORE + offset) + " (was " + (AUTOTRADE_MIN_SCORE + before) + ").");
   } catch (e) { console.error("reviewStrictness failed:", e.message); }
 }
 
@@ -1588,7 +1678,7 @@ async function tryOpenNewPosition() {
   if (state.halted) return "paused";
   if (autotradeFaulted) return "stopped after a fault";
   if (routeCheck.ok === false) return "trading connection down";
-  if (state.realizedPnlTodaySol <= -AUTOTRADE_DAILY_LOSS_CAP_SOL) {
+  if (!PAPER && state.realizedPnlTodaySol <= -AUTOTRADE_DAILY_LOSS_CAP_SOL) {
     if (lossCapNotifiedDay !== state.dayKey) {
       lossCapNotifiedDay = state.dayKey;
       console.log("Autotrade: daily loss cap reached, no new buys today");
@@ -1607,7 +1697,7 @@ async function tryOpenNewPosition() {
     }
     return "balance too low (" + bal.toFixed(4) + " SOL)";
   }
-  const recent = new Set((await pool.query("SELECT DISTINCT mint FROM autotrade_positions WHERE opened_at > now() - make_interval(hours => $1::int)", [Math.round(AUTOTRADE_REBUY_COOLDOWN_HOURS)])).rows.map(r => r.mint));
+  const recent = new Set((await pool.query("SELECT DISTINCT mint FROM autotrade_positions WHERE mode=$2 AND opened_at > now() - make_interval(hours => $1::int)", [Math.round(AUTOTRADE_REBUY_COOLDOWN_HOURS), AUTOTRADE_MODE])).rows.map(r => r.mint));
   for (const p of open) recent.add(p.mint);
   const minScore = effectiveMinScore(state);
   const scored = getCalls().filter(t => t.signal.score >= minScore && !recent.has(t.mint) && manipulationAdjustment(t) >= 0);
@@ -1642,7 +1732,7 @@ async function autotradeHeartbeat() {
     let bal = null; try { bal = +(await walletSolBalance(kp.publicKey.toBase58())).toFixed(4); } catch {}
     const minScore = effectiveMinScore(st);
     console.log("AUTOTRADE_HB " + JSON.stringify({
-      balanceSol: bal, pnlTodaySol: +st.realizedPnlTodaySol.toFixed(4), minScore, halted: st.halted, faulted: autotradeFaulted, route: routeCheck.ok,
+      mode: AUTOTRADE_MODE, balanceSol: bal, pnlTodaySol: +st.realizedPnlTodaySol.toFixed(4), minScore, halted: st.halted, faulted: autotradeFaulted, route: routeCheck.ok,
       open: open.map(p => { const m = positionMarks.get(p.id); return { s: p.symbol, chgPct: m ? +((m.mult - 1) * 100).toFixed(1) : null, src: m?.source || null, tiers: p.exits_taken || [], min: Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60000) }; }),
       lastBuy: lastBuySkipReason, candidatesAtMin: getCalls().filter(t => t.signal.score >= minScore).length
     }));
@@ -1669,10 +1759,12 @@ function adminTokenOk(req) {
 
 async function autotradeStatusSummary() {
   const kp = loadAutotradeKeypair();
-  const base = { enabled: AUTOTRADE_ENABLED, configured: !!kp, live: AUTOTRADE_ENABLED && !!kp, faulted: autotradeFaulted, routeCheck, usingDefaultRpc: !process.env.SOLANA_RPC_URL, alertsConfigured: !!(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID), maxSolPerTrade: AUTOTRADE_MAX_SOL_PER_TRADE, maxConcurrentPositions: AUTOTRADE_MAX_CONCURRENT_POSITIONS, dailyLossCapSol: AUTOTRADE_DAILY_LOSS_CAP_SOL, minScore: AUTOTRADE_MIN_SCORE, baseMinScore: AUTOTRADE_MIN_SCORE, minScoreOffset: 0, stopLossPct: AUTOTRADE_STOP_LOSS_PCT, maxHoldMinutes: AUTOTRADE_MAX_HOLD_MINUTES, tpLadder: TP_LADDER.map(x => ({ gainPct: Math.round((x.multiple - 1) * 100), sellPct: x.sellPct })), lastCheck: lastBuySkipReason };
+  const base = { mode: AUTOTRADE_MODE, enabled: AUTOTRADE_ENABLED, configured: !!kp, live: AUTOTRADE_ENABLED && !!kp, faulted: autotradeFaulted, routeCheck, usingDefaultRpc: !process.env.SOLANA_RPC_URL, alertsConfigured: !!(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID), maxSolPerTrade: AUTOTRADE_MAX_SOL_PER_TRADE, maxConcurrentPositions: AUTOTRADE_MAX_CONCURRENT_POSITIONS, dailyLossCapSol: AUTOTRADE_DAILY_LOSS_CAP_SOL, minScore: AUTOTRADE_MIN_SCORE, baseMinScore: AUTOTRADE_MIN_SCORE, minScoreOffset: 0, stopLossPct: AUTOTRADE_STOP_LOSS_PCT, maxHoldMinutes: AUTOTRADE_MAX_HOLD_MINUTES, tpLadder: TP_LADDER.map(x => ({ gainPct: Math.round((x.multiple - 1) * 100), sellPct: x.sellPct })), lastCheck: lastBuySkipReason };
   if (!kp) return { ...base, walletAddress: null, solBalance: null, halted: null, realizedPnlTodaySol: null, openPositions: [], recentTrades: [] };
   let solBalance = null;
-  try { const bal = await rpcCall("getBalance", [kp.publicKey.toBase58(), { commitment: "confirmed" }]); solBalance = (bal?.value || 0) / 1e9; } catch {}
+  let realSolBalance = null;
+  try { const bal = await rpcCall("getBalance", [kp.publicKey.toBase58(), { commitment: "confirmed" }]); realSolBalance = (bal?.value || 0) / 1e9; } catch {}
+  try { solBalance = PAPER ? await paperBalanceSol() : realSolBalance; } catch {}
   const state = await getAutotradeState();
   const openPositions = (await getOpenAutotradePositions()).map(p => {
     const t = tokens.get(p.mint), price = +t?.pair?.priceUsd || null, entry = p.entry_price_usd != null ? +p.entry_price_usd : null;
@@ -1684,8 +1776,8 @@ async function autotradeStatusSummary() {
     };
   });
   let recentTrades = [];
-  if (dbReady) recentTrades = (await pool.query("SELECT mint,symbol,side,ts,sol_amount,price_usd,tx_signature,reason FROM autotrade_trades ORDER BY ts DESC LIMIT 25")).rows;
-  return { ...base, minScore: effectiveMinScore(state), minScoreOffset: state.minScoreOffset || 0, walletAddress: kp.publicKey.toBase58(), solBalance, halted: state.halted, realizedPnlTodaySol: state.realizedPnlTodaySol, openPositions, recentTrades };
+  if (dbReady) recentTrades = (await pool.query("SELECT mint,symbol,side,ts,sol_amount,price_usd,tx_signature,reason FROM autotrade_trades WHERE mode=$1 ORDER BY ts DESC LIMIT 25", [AUTOTRADE_MODE])).rows;
+  return { ...base, mode: AUTOTRADE_MODE, realSolBalance, minScore: effectiveMinScore(state), minScoreOffset: state.minScoreOffset || 0, walletAddress: kp.publicKey.toBase58(), solBalance, halted: state.halted, realizedPnlTodaySol: state.realizedPnlTodaySol, openPositions, recentTrades };
 }
 
 // ---- security: rate limiting + daily LLM spend cap ----
@@ -1936,6 +2028,20 @@ setInterval(() => {
 setInterval(() => resolveOutcomes().catch(e => console.error("resolveOutcomes failed:", e.message)), 2 * 60000);
 setInterval(() => pruneOldObservations().catch(e => console.error("pruneOldObservations failed:", e.message)), 6 * 60 * 60000); // every 6h
 setTimeout(() => runBacktest().catch(e => console.error("runBacktest failed:", e.message)), 90000);
+setTimeout(() => {
+  if (!loadAutotradeKeypair()) return;
+  withAutotradeLock(async () => {
+    const kp = loadAutotradeKeypair(), owner = kp.publicKey.toBase58();
+    let before = null; try { before = (await rpcCall("getBalance", [owner, { commitment: "confirmed" }]))?.value; } catch {}
+    const n = await reclaimTokenAccountRent();
+    if (n) {
+      await sleep(3000);
+      let after = null; try { after = (await rpcCall("getBalance", [owner, { commitment: "confirmed" }]))?.value; } catch {}
+      const back = before != null && after != null ? ((after - before) / 1e9).toFixed(4) : "?";
+      sendTelegramText("♻️ Autobot wallet: closed " + n + " empty token account(s) left over from past trades and got back " + back + " SOL in deposits.").catch(() => {});
+    }
+  }, { wait: true }).catch(e => console.error("rent reclaim sweep failed:", e.message));
+}, 120000);
 setInterval(() => runBacktest().catch(e => console.error("runBacktest failed:", e.message)), 6 * 60 * 60000);
 setInterval(() => autotradeCycle(), AUTOTRADE_LOOP_INTERVAL_MS);
 setInterval(() => autotradeHeartbeat(), 5 * 60000);
