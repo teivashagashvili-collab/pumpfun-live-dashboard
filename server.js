@@ -1049,19 +1049,58 @@ function loadAutotradeKeypair() {
 let _autotradeConn = null;
 function solanaConnection() { if (!_autotradeConn) _autotradeConn = new Connection(process.env.SOLANA_RPC_URL || "https://api.mainnet-beta.solana.com", "confirmed"); return _autotradeConn; }
 
-async function jupiterQuote(inputMint, outputMint, amountRaw, slippageBps) {
-  return await getJSON(`https://quote-api.jup.ag/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountRaw}&slippageBps=${slippageBps}`, 12000);
+// Jupiter has moved its API more than once (quote-api.jup.ag/v6 → lite-api.jup.ag/swap/v1), and
+// both expose the same /quote and /swap shapes. checkTradingRoute() probes these in order from the
+// live server and pins whichever works; JUPITER_API_BASE overrides the list entirely.
+const JUPITER_API_BASES = process.env.JUPITER_API_BASE ? [process.env.JUPITER_API_BASE] : ["https://lite-api.jup.ag/swap/v1", "https://quote-api.jup.ag/v6"];
+let jupiterBase = JUPITER_API_BASES[0];
+const AUTOTRADE_MAX_PRIORITY_FEE_LAMPORTS = Number(process.env.AUTOTRADE_MAX_PRIORITY_FEE_LAMPORTS || 1000000); // 0.001 SOL ceiling per tx
+function jupiterHeaders() { return process.env.JUPITER_API_KEY ? { "x-api-key": process.env.JUPITER_API_KEY } : {}; }
+
+async function jupiterQuote(inputMint, outputMint, amountRaw, slippageBps, base = jupiterBase) {
+  return await getJSON(`${base}/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountRaw}&slippageBps=${slippageBps}`, 12000, jupiterHeaders());
 }
 
-async function jupiterSwapTransaction(quote, ownerPubkey) {
-  const r = await fetch("https://quote-api.jup.ag/v6/swap", {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ quoteResponse: quote, userPublicKey: ownerPubkey, wrapAndUnwrapSol: true, dynamicComputeUnitLimit: true, prioritizationFeeLamports: "auto" })
-  });
-  if (!r.ok) throw Error("Jupiter swap-build failed: " + r.status);
-  const j = await r.json();
-  if (!j.swapTransaction) throw Error("Jupiter swap response missing transaction");
-  return j.swapTransaction;
+async function jupiterSwapTransaction(quote, ownerPubkey, base = jupiterBase) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15000);
+  try {
+    const r = await fetch(`${base}/swap`, {
+      method: "POST", headers: { "content-type": "application/json", ...jupiterHeaders() }, signal: ctrl.signal,
+      body: JSON.stringify({
+        quoteResponse: quote, userPublicKey: ownerPubkey, wrapAndUnwrapSol: true, dynamicComputeUnitLimit: true,
+        // Capped instead of "auto": during congestion "auto" can bid fees that eat a real chunk of a 0.05 SOL trade.
+        prioritizationFeeLamports: { priorityLevelWithMaxLamports: { maxLamports: AUTOTRADE_MAX_PRIORITY_FEE_LAMPORTS, priorityLevel: "high" } }
+      })
+    });
+    if (!r.ok) throw Error("Jupiter swap-build failed: " + r.status);
+    const j = await r.json();
+    if (!j.swapTransaction) throw Error("Jupiter swap response missing transaction");
+    return j.swapTransaction;
+  } finally { clearTimeout(timer); }
+}
+
+// Proves the trading path works from the live server without spending anything: fetches a real
+// quote and, when a wallet key is configured, has Jupiter build (never sign, never send) a swap.
+const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+let routeCheck = { ok: null, base: null, swapBuildOk: null, checkedAt: null, error: null };
+async function checkTradingRoute() {
+  const errors = [];
+  for (const base of JUPITER_API_BASES) {
+    try {
+      const q = await jupiterQuote(SOL_MINT, USDC_MINT, 10000000, 50, base);
+      if (!q?.outAmount) throw Error(q?.error || "quote had no outAmount");
+      const kp = loadAutotradeKeypair();
+      let swapBuildOk = null;
+      if (kp) { await jupiterSwapTransaction(q, kp.publicKey.toBase58(), base); swapBuildOk = true; }
+      jupiterBase = base;
+      routeCheck = { ok: true, base, swapBuildOk, checkedAt: Date.now(), error: null };
+      console.log("Trading route check OK via " + base + (swapBuildOk ? " (quote + unsigned swap build)" : " (quote only, no wallet key yet)"));
+      return;
+    } catch (e) { errors.push(base + " → " + e.message); }
+  }
+  routeCheck = { ok: false, base: null, swapBuildOk: false, checkedAt: Date.now(), error: errors.join(" | ") };
+  console.error("Trading route check FAILED: " + routeCheck.error);
 }
 
 // All amounts in and out of this function are raw base units (lamports for SOL, the token's own
@@ -1249,7 +1288,7 @@ async function autotradeCycle() {
   try {
     const state = await getAutotradeState();
     for (const pos of await getOpenAutotradePositions()) { try { await manageAutotradePosition(pos); } catch (e) { console.error("autotrade manage failed", pos.mint, e.message); } }
-    if (state.halted || autotradeFaulted) return;
+    if (state.halted || autotradeFaulted || routeCheck.ok === false) return;
     if (state.realizedPnlTodaySol <= -AUTOTRADE_DAILY_LOSS_CAP_SOL) {
       if (lossCapNotifiedDay !== state.dayKey) {
         lossCapNotifiedDay = state.dayKey;
@@ -1283,7 +1322,7 @@ function adminTokenOk(req) {
 
 async function autotradeStatusSummary() {
   const kp = loadAutotradeKeypair();
-  const base = { enabled: AUTOTRADE_ENABLED, configured: !!kp, live: AUTOTRADE_ENABLED && !!kp, faulted: autotradeFaulted, usingDefaultRpc: !process.env.SOLANA_RPC_URL, alertsConfigured: !!(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID), maxSolPerTrade: AUTOTRADE_MAX_SOL_PER_TRADE, maxConcurrentPositions: AUTOTRADE_MAX_CONCURRENT_POSITIONS, dailyLossCapSol: AUTOTRADE_DAILY_LOSS_CAP_SOL, minScore: AUTOTRADE_MIN_SCORE };
+  const base = { enabled: AUTOTRADE_ENABLED, configured: !!kp, live: AUTOTRADE_ENABLED && !!kp, faulted: autotradeFaulted, routeCheck, usingDefaultRpc: !process.env.SOLANA_RPC_URL, alertsConfigured: !!(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID), maxSolPerTrade: AUTOTRADE_MAX_SOL_PER_TRADE, maxConcurrentPositions: AUTOTRADE_MAX_CONCURRENT_POSITIONS, dailyLossCapSol: AUTOTRADE_DAILY_LOSS_CAP_SOL, minScore: AUTOTRADE_MIN_SCORE };
   if (!kp) return { ...base, walletAddress: null, solBalance: null, halted: null, realizedPnlTodaySol: null, openPositions: [], recentTrades: [] };
   let solBalance = null;
   try { const bal = await rpcCall("getBalance", [kp.publicKey.toBase58(), { commitment: "confirmed" }]); solBalance = (bal?.value || 0) / 1e9; } catch {}
@@ -1550,6 +1589,11 @@ setInterval(() => {
 setInterval(() => resolveOutcomes().catch(e => console.error("resolveOutcomes failed:", e.message)), 2 * 60000);
 setInterval(() => pruneOldObservations().catch(e => console.error("pruneOldObservations failed:", e.message)), 6 * 60 * 60000); // every 6h
 setInterval(() => autotradeCycle(), AUTOTRADE_LOOP_INTERVAL_MS);
+setTimeout(() => checkTradingRoute().catch(e => console.error("checkTradingRoute failed:", e.message)), 5000);
+// Re-check every 10 min while broken (so it recovers on its own), otherwise every 6h.
+setInterval(() => {
+  if (routeCheck.ok !== true || Date.now() - (routeCheck.checkedAt || 0) > 6 * 3600000) checkTradingRoute().catch(e => console.error("checkTradingRoute failed:", e.message));
+}, 10 * 60000);
 
 initDB().then(hydrateAutotradeHeldMints).catch(() => {});
 // Doubles as a restart notice and an end-to-end check that the token and chat ID actually work.

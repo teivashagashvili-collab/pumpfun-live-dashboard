@@ -160,6 +160,7 @@ th.tip:hover::after{top:150%}
     <div class="statline"><span>Most it'll hold at once</span><b id="abMaxPositions">—</b></div>
     <div class="statline"><span>Minimum score to buy</span><b id="abMinScore">—</b></div>
     <div class="statline"><span>Stops buying for the day if it loses</span><b id="abDailyLossCapLine">—</b></div>
+    <div class="statline"><span class="tip" data-tip="The app regularly asks the trading service for a real price quote, and once a wallet is added, has it prepare a practice trade that is never signed or sent. No money is used.">Trading connection</span><b id="abRoute">—</b></div>
     <div id="abConfigNotes"></div>
     <p class="muted" style="font-size:11.5px;margin-top:10px">These are set in Railway, not on this page, so they can be tuned without a code change. <span class="tip" data-tip="No. It always uses the same fixed rules — the same score and safety checks as the rest of the site. It keeps a permanent record of every trade so you can see whether the rules actually work over time, but nothing here automatically changes its own behavior based on results.">Does it get smarter over time? →</span></p>
   </section>
@@ -545,7 +546,10 @@ th.tip:hover::after{top:150%}
     $("abMaxPositions").textContent=d.maxConcurrentPositions+" coins at once";
     $("abMinScore").textContent=d.minScore+" / 100";
     $("abDailyLossCapLine").textContent=d.dailyLossCapSol+" SOL";
+    const rc=d.routeCheck||{};
+    $("abRoute").innerHTML=rc.ok===true?'<span class="pos">Working'+(rc.swapBuildOk?' (practice trade built)':' (price check only — add the wallet to test a full trade)')+'</span>':rc.ok===false?'<span class="neg">Not working</span>':'<span class="muted">Checking…</span>';
     const notes=[];
+    if(rc.ok===false)notes.push("The bot can't reach the trading service right now, so it won't buy anything until this works again. It re-checks every 10 minutes on its own.");
     if(d.configured&&d.usingDefaultRpc)notes.push("Using Solana's free public connection, which is rate-limited and can make trades fail or lag. Before trading for real, set SOLANA_RPC_URL in Railway to a dedicated provider (e.g. Helius or QuickNode — both have free tiers).");
     if(!d.alertsConfigured)notes.push("Phone alerts are off. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in Railway to get a message every time it buys, sells, pauses, or hits its loss limit.");
     $("abConfigNotes").innerHTML=notes.map(n=>'<div class="notice" style="margin:10px 0 0">'+esc(n)+'</div>').join("");
