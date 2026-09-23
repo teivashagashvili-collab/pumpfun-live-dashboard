@@ -1,4 +1,4 @@
-const http = require("http"), fs = require("fs"), path = require("path"), WebSocket = require("ws");
+const http = require("http"), fs = require("fs"), path = require("path"), crypto = require("crypto"), WebSocket = require("ws");
 const { URL } = require("url");
 const { Pool } = require("pg");
 const { Connection, Keypair, VersionedTransaction } = require("@solana/web3.js");
@@ -279,15 +279,25 @@ async function sendTelegramAlert(t) {
     "Score: " + t.signal.score + "/100 · Risk: " + Math.round(t.rug?.scoreNormalized || 0) + "\n" +
     "MC: " + usd(p.marketCap || p.fdv) + " · Liq: " + usd(p.liquidity?.usd) + "\n" +
     "Research only, not financial advice.\n" + url;
+  await sendTelegramText(text);
+}
+
+async function sendTelegramText(text) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 8000);
   try {
     await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: "POST", headers: { "content-type": "application/json" }, signal: ctrl.signal,
-      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text, disable_web_page_preview: true })
+      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: String(text).slice(0, 4000), disable_web_page_preview: true })
     });
   } catch (e) { console.error("Telegram alert failed:", e.message); } finally { clearTimeout(timer); }
 }
+
+// Every autobot buy/sell/fault goes to Telegram (when configured) regardless of TELEGRAM_MIN_SCORE —
+// this is a record of real money moving, not a research alert. Fire-and-forget so a slow Telegram
+// API never delays trade bookkeeping.
+function notifyAutotrade(text) { sendTelegramText(text).catch(() => {}); }
 
 // ---- call logging: every token that crosses the qualification bar gets a timestamped record ----
 const loggedAt = new Map(); // mint -> last logged timestamp (in-process cooldown so we don't spam duplicate rows)
@@ -687,7 +697,13 @@ async function add(e) {
   inflight.add(mint);
   try {
     const existing = tokens.get(mint); if (existing?.pair && Date.now() - (existing.updatedAt || 0) < 12000) return;
-    tokens.set(mint, { ...(existing || {}), ...t }); while (tokens.size > 500) tokens.delete(tokens.keys().next().value);
+    tokens.set(mint, { ...(existing || {}), ...t });
+    while (tokens.size > 500) {
+      let victim = null;
+      for (const k of tokens.keys()) { if (!autotradeHeldMints.has(k)) { victim = k; break; } }
+      if (!victim) break;
+      tokens.delete(victim);
+    }
     const z = await enrich({ ...tokens.get(mint), ...t }); tokens.set(mint, z); broadcast("update", z);
   } catch (err) { console.error("token ingest failed", mint, err.message); } finally { inflight.delete(mint); }
 }
@@ -1000,6 +1016,20 @@ async function walletPortfolio(address) {
 // variable, generated in the user's own wallet app, never pasted into this chat) and kept only in
 // this process's memory — it is never logged, never included in any API response, and never
 // echoed back on a parse error.
+// Mints with an open autotrade position — the in-memory `tokens` Map is capped at 500 entries
+// (oldest evicted first, see add()) to bound memory, which is fine for tokens nobody holds. A
+// mint the bot actually has real money in must never be evicted just because 500 newer pump.fun
+// tokens showed up, since manageAutotradePosition() silently stops managing (no stop-loss, no
+// take-profit) any position it can't find live price data for.
+const autotradeHeldMints = new Set();
+async function hydrateAutotradeHeldMints() {
+  if (!dbReady) return;
+  try {
+    const r = await pool.query("SELECT mint FROM autotrade_positions WHERE status='open'");
+    for (const row of r.rows) autotradeHeldMints.add(row.mint);
+  } catch (e) { console.error("hydrateAutotradeHeldMints failed:", e.message); }
+}
+
 let autotradeKeypair = null, autotradeKeypairError = "";
 function loadAutotradeKeypair() {
   if (autotradeKeypair || autotradeKeypairError) return autotradeKeypair;
@@ -1061,10 +1091,10 @@ async function getAutotradeState() {
 
 async function setAutotradeHalted(halted) { if (dbReady) await pool.query("UPDATE autotrade_state SET halted=$1 WHERE id=1", [halted]); }
 
-async function addRealizedPnlToday(deltaSol) {
+async function addRealizedPnlToday(deltaSol, db = pool) {
   if (!dbReady) return;
   const today = new Date().toISOString().slice(0, 10);
-  await pool.query(`UPDATE autotrade_state SET realized_pnl_today_sol = CASE WHEN day_key=$1 THEN realized_pnl_today_sol + $2 ELSE $2 END, day_key=$1 WHERE id=1`, [today, deltaSol]);
+  await db.query(`UPDATE autotrade_state SET realized_pnl_today_sol = CASE WHEN day_key=$1 THEN realized_pnl_today_sol + $2 ELSE $2 END, day_key=$1 WHERE id=1`, [today, deltaSol]);
 }
 
 async function getOpenAutotradePositions() {
@@ -1073,24 +1103,65 @@ async function getOpenAutotradePositions() {
   return r.rows;
 }
 
-async function recordAutotradeTrade(positionId, mint, symbol, side, solAmount, priceUsd, signature, reason) {
+async function recordAutotradeTrade(positionId, mint, symbol, side, solAmount, priceUsd, signature, reason, db = pool) {
   if (!dbReady) return;
-  await pool.query(`INSERT INTO autotrade_trades(position_id,mint,symbol,side,sol_amount,price_usd,tx_signature,reason) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+  await db.query(`INSERT INTO autotrade_trades(position_id,mint,symbol,side,sol_amount,price_usd,tx_signature,reason) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
     [positionId, mint, symbol || null, side, solAmount, priceUsd || null, signature || null, reason || null]);
+}
+
+// The swap is real and irreversible the moment it confirms; the DB write after it is not. A
+// transient Postgres failure there must not leave a position the bot owns but has no record of
+// (it would never be stop-lossed or sold). So: the bookkeeping for each swap is one transaction
+// (all-or-nothing, so a retry can't double-insert), retried a few times, and if it still fails the
+// bot faults — no new buys until a human looks — and logs everything needed to recover by hand.
+let autotradeFaulted = false;
+async function dbTx(fn) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const out = await fn(client);
+    await client.query("COMMIT");
+    return out;
+  } catch (e) {
+    try { await client.query("ROLLBACK"); } catch {}
+    throw e;
+  } finally { client.release(); }
+}
+async function dbRetry(fn, attempts = 3) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try { return await fn(); } catch (e) { lastErr = e; await new Promise(r => setTimeout(r, 500 * (i + 1))); }
+  }
+  throw lastErr;
+}
+async function faultAutotrade(detail) {
+  autotradeFaulted = true;
+  console.error("AUTOTRADE FAULT — new buys stopped until resumed from the Autobot page, manual check needed:", detail);
+  try { await setAutotradeHalted(true); } catch {}
+  notifyAutotrade("⚠️ Autobot FAULT — stopped buying. " + detail);
 }
 
 async function openAutotradePosition(t) {
   const plan = tradePlan(t);
   const solLamports = Math.floor(AUTOTRADE_MAX_SOL_PER_TRADE * 1e9);
   const { signature, quote } = await executeSwap(SOL_MINT, t.mint, solLamports, AUTOTRADE_SLIPPAGE_BPS);
+  autotradeHeldMints.add(t.mint);
   const priceUsd = +t.pair?.priceUsd || null;
-  const r = await pool.query(
-    `INSERT INTO autotrade_positions(mint,name,symbol,sol_spent,token_amount_raw,remaining_token_amount_raw,entry_price_usd,invalidation_price_usd)
-     VALUES($1,$2,$3,$4,$5,$5,$6,$7) RETURNING id`,
-    [t.mint, t.name || null, t.symbol || null, AUTOTRADE_MAX_SOL_PER_TRADE, quote.outAmount, priceUsd, plan.invalidation?.price || null]
-  );
-  await recordAutotradeTrade(r.rows[0].id, t.mint, t.symbol, "buy", AUTOTRADE_MAX_SOL_PER_TRADE, priceUsd, signature, "opened: score " + t.signal.score + "/100");
+  try {
+    await dbRetry(() => dbTx(async c => {
+      const r = await c.query(
+        `INSERT INTO autotrade_positions(mint,name,symbol,sol_spent,token_amount_raw,remaining_token_amount_raw,entry_price_usd,invalidation_price_usd)
+         VALUES($1,$2,$3,$4,$5,$5,$6,$7) RETURNING id`,
+        [t.mint, t.name || null, t.symbol || null, AUTOTRADE_MAX_SOL_PER_TRADE, quote.outAmount, priceUsd, plan.invalidation?.price || null]
+      );
+      await recordAutotradeTrade(r.rows[0].id, t.mint, t.symbol, "buy", AUTOTRADE_MAX_SOL_PER_TRADE, priceUsd, signature, "opened: score " + t.signal.score + "/100", c);
+    }));
+  } catch (e) {
+    await faultAutotrade("bought " + (t.symbol || t.mint) + " (mint " + t.mint + ", raw amount " + quote.outAmount + ", tx " + signature + ") but could not record the position: " + e.message);
+    return;
+  }
   console.log("Autotrade BUY", t.symbol || t.mint, AUTOTRADE_MAX_SOL_PER_TRADE, "SOL — sig", signature);
+  notifyAutotrade("🟢 Autobot bought " + sanitizeForPrompt(t.symbol || t.mint, 20) + " for " + AUTOTRADE_MAX_SOL_PER_TRADE + " SOL (score " + t.signal.score + "/100).\nhttps://solscan.io/tx/" + signature);
 }
 
 async function closeAutotradePosition(pos, reason) {
@@ -1100,12 +1171,22 @@ async function closeAutotradePosition(pos, reason) {
     const solOut = Number(quote.outAmount) / 1e9;
     const realizedTotal = Number(pos.realized_sol) + solOut;
     const pnl = realizedTotal - Number(pos.sol_spent);
-    await recordAutotradeTrade(pos.id, pos.mint, pos.symbol, "sell", solOut, +tokens.get(pos.mint)?.pair?.priceUsd || null, signature, reason);
-    await pool.query("UPDATE autotrade_positions SET status='closed', closed_at=now(), remaining_token_amount_raw=0, realized_sol=$1, realized_pnl_sol=$2, close_reason=$3 WHERE id=$4", [realizedTotal, pnl, reason, pos.id]);
-    await addRealizedPnlToday(pnl);
+    try {
+      await dbRetry(() => dbTx(async c => {
+        await recordAutotradeTrade(pos.id, pos.mint, pos.symbol, "sell", solOut, +tokens.get(pos.mint)?.pair?.priceUsd || null, signature, reason, c);
+        await c.query("UPDATE autotrade_positions SET status='closed', closed_at=now(), remaining_token_amount_raw=0, realized_sol=$1, realized_pnl_sol=$2, close_reason=$3 WHERE id=$4", [realizedTotal, pnl, reason, pos.id]);
+        await addRealizedPnlToday(pnl, c);
+      }));
+    } catch (e) {
+      await faultAutotrade("sold " + (pos.symbol || pos.mint) + " (tx " + signature + ") but could not record it: " + e.message);
+      return;
+    }
+    autotradeHeldMints.delete(pos.mint);
     console.log("Autotrade CLOSE", pos.symbol || pos.mint, "pnl", pnl.toFixed(4), "SOL —", reason);
+    notifyAutotrade((pnl >= 0 ? "✅" : "🔻") + " Autobot sold " + sanitizeForPrompt(pos.symbol || pos.mint, 20) + ": " + (pnl >= 0 ? "+" : "") + pnl.toFixed(4) + " SOL (" + reason + ").\nhttps://solscan.io/tx/" + signature);
   } else {
     await pool.query("UPDATE autotrade_positions SET status='closed', closed_at=now(), close_reason=$1 WHERE id=$2", [reason, pos.id]);
+    autotradeHeldMints.delete(pos.mint);
   }
 }
 
@@ -1117,16 +1198,26 @@ async function partialExitAutotradePosition(pos, exitIndex, sellPct) {
   const solOut = Number(quote.outAmount) / 1e9;
   const newRemaining = remaining - sellRaw;
   const exitsTaken = [...(pos.exits_taken || []), exitIndex];
-  await recordAutotradeTrade(pos.id, pos.mint, pos.symbol, "sell", solOut, +tokens.get(pos.mint)?.pair?.priceUsd || null, signature, "take-profit tier " + exitIndex);
-  if (newRemaining <= 0) {
-    const realizedTotal = Number(pos.realized_sol) + solOut;
-    const pnl = realizedTotal - Number(pos.sol_spent);
-    await pool.query("UPDATE autotrade_positions SET status='closed', closed_at=now(), remaining_token_amount_raw=0, realized_sol=$1, realized_pnl_sol=$2, exits_taken=$3, close_reason=$4 WHERE id=$5", [realizedTotal, pnl, JSON.stringify(exitsTaken), "final take-profit tier", pos.id]);
-    await addRealizedPnlToday(pnl);
-  } else {
-    await pool.query("UPDATE autotrade_positions SET remaining_token_amount_raw=$1, realized_sol=realized_sol+$2, exits_taken=$3 WHERE id=$4", [newRemaining, solOut, JSON.stringify(exitsTaken), pos.id]);
+  let pnl = null;
+  try {
+    await dbRetry(() => dbTx(async c => {
+      await recordAutotradeTrade(pos.id, pos.mint, pos.symbol, "sell", solOut, +tokens.get(pos.mint)?.pair?.priceUsd || null, signature, "take-profit tier " + exitIndex, c);
+      if (newRemaining <= 0) {
+        const realizedTotal = Number(pos.realized_sol) + solOut;
+        pnl = realizedTotal - Number(pos.sol_spent);
+        await c.query("UPDATE autotrade_positions SET status='closed', closed_at=now(), remaining_token_amount_raw=0, realized_sol=$1, realized_pnl_sol=$2, exits_taken=$3, close_reason=$4 WHERE id=$5", [realizedTotal, pnl, JSON.stringify(exitsTaken), "final take-profit tier", pos.id]);
+        await addRealizedPnlToday(pnl, c);
+      } else {
+        await c.query("UPDATE autotrade_positions SET remaining_token_amount_raw=$1, realized_sol=realized_sol+$2, exits_taken=$3 WHERE id=$4", [newRemaining, solOut, JSON.stringify(exitsTaken), pos.id]);
+      }
+    }));
+  } catch (e) {
+    await faultAutotrade("took profit on " + (pos.symbol || pos.mint) + " (tx " + signature + ") but could not record it: " + e.message);
+    return;
   }
+  if (newRemaining <= 0) autotradeHeldMints.delete(pos.mint);
   console.log("Autotrade TAKE-PROFIT", pos.symbol || pos.mint, "tier", exitIndex, "+" + solOut.toFixed(4), "SOL");
+  notifyAutotrade("💰 Autobot took profit on " + sanitizeForPrompt(pos.symbol || pos.mint, 20) + ": sold " + sellPct + "% for " + solOut.toFixed(4) + " SOL.\nhttps://solscan.io/tx/" + signature);
 }
 
 // One tranche managed per cycle, on purpose: keeps every automatic decision individually auditable
@@ -1148,14 +1239,22 @@ async function manageAutotradePosition(pos) {
   }
 }
 
+let lossCapNotifiedDay = "";
 async function autotradeCycle() {
   if (!AUTOTRADE_ENABLED || !dbReady) return;
   if (!loadAutotradeKeypair()) return;
   try {
     const state = await getAutotradeState();
     for (const pos of await getOpenAutotradePositions()) { try { await manageAutotradePosition(pos); } catch (e) { console.error("autotrade manage failed", pos.mint, e.message); } }
-    if (state.halted) return;
-    if (state.realizedPnlTodaySol <= -AUTOTRADE_DAILY_LOSS_CAP_SOL) { console.log("Autotrade: daily loss cap reached, no new buys today"); return; }
+    if (state.halted || autotradeFaulted) return;
+    if (state.realizedPnlTodaySol <= -AUTOTRADE_DAILY_LOSS_CAP_SOL) {
+      if (lossCapNotifiedDay !== state.dayKey) {
+        lossCapNotifiedDay = state.dayKey;
+        console.log("Autotrade: daily loss cap reached, no new buys today");
+        notifyAutotrade("🛑 Autobot hit today's loss limit (" + state.realizedPnlTodaySol.toFixed(4) + " SOL). No new buys until tomorrow (UTC); open positions are still being managed.");
+      }
+      return;
+    }
     const stillOpen = await getOpenAutotradePositions();
     if (stillOpen.length >= AUTOTRADE_MAX_CONCURRENT_POSITIONS) return;
     const held = new Set(stillOpen.map(p => p.mint));
@@ -1171,9 +1270,17 @@ async function liquidateAllAutotradePositions() {
   return closed;
 }
 
+// Constant-time compare so the kill-switch password can't be recovered by timing responses.
+function adminTokenOk(req) {
+  if (!AUTOTRADE_ADMIN_TOKEN) return false;
+  const given = Buffer.from(String(req.headers["x-autotrade-admin-token"] || ""));
+  const want = Buffer.from(AUTOTRADE_ADMIN_TOKEN);
+  return given.length === want.length && crypto.timingSafeEqual(given, want);
+}
+
 async function autotradeStatusSummary() {
   const kp = loadAutotradeKeypair();
-  const base = { enabled: AUTOTRADE_ENABLED, configured: !!kp, live: AUTOTRADE_ENABLED && !!kp, maxSolPerTrade: AUTOTRADE_MAX_SOL_PER_TRADE, maxConcurrentPositions: AUTOTRADE_MAX_CONCURRENT_POSITIONS, dailyLossCapSol: AUTOTRADE_DAILY_LOSS_CAP_SOL, minScore: AUTOTRADE_MIN_SCORE };
+  const base = { enabled: AUTOTRADE_ENABLED, configured: !!kp, live: AUTOTRADE_ENABLED && !!kp, faulted: autotradeFaulted, usingDefaultRpc: !process.env.SOLANA_RPC_URL, alertsConfigured: !!(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID), maxSolPerTrade: AUTOTRADE_MAX_SOL_PER_TRADE, maxConcurrentPositions: AUTOTRADE_MAX_CONCURRENT_POSITIONS, dailyLossCapSol: AUTOTRADE_DAILY_LOSS_CAP_SOL, minScore: AUTOTRADE_MIN_SCORE };
   if (!kp) return { ...base, walletAddress: null, solBalance: null, halted: null, realizedPnlTodaySol: null, openPositions: [], recentTrades: [] };
   let solBalance = null;
   try { const bal = await rpcCall("getBalance", [kp.publicKey.toBase58(), { commitment: "confirmed" }]); solBalance = (bal?.value || 0) / 1e9; } catch {}
@@ -1441,7 +1548,7 @@ setInterval(() => resolveOutcomes().catch(e => console.error("resolveOutcomes fa
 setInterval(() => pruneOldObservations().catch(e => console.error("pruneOldObservations failed:", e.message)), 6 * 60 * 60000); // every 6h
 setInterval(() => autotradeCycle(), AUTOTRADE_LOOP_INTERVAL_MS);
 
-initDB().catch(() => {});
+initDB().then(hydrateAutotradeHeldMints).catch(() => {});
 bootstrapDex();
 
 http.createServer(async (req, res) => {
@@ -1475,16 +1582,19 @@ http.createServer(async (req, res) => {
   if (u.pathname === "/api/learning") return send(res, 200, { persistent: await persistentStats(), inProcess: learning });
   if (u.pathname === "/api/autotrade/status") { try { return send(res, 200, await autotradeStatusSummary()); } catch (e) { return send(res, 500, { error: e.message }); } }
   if (u.pathname === "/api/autotrade/halt" && req.method === "POST") {
-    if (!AUTOTRADE_ADMIN_TOKEN || req.headers["x-autotrade-admin-token"] !== AUTOTRADE_ADMIN_TOKEN) return send(res, 403, { error: "invalid or unconfigured admin token" });
-    await setAutotradeHalted(true); return send(res, 200, { halted: true });
+    if (rateLimited("admin:" + clientIp(req), 10)) return send(res, 429, { error: "too many attempts, wait a minute" });
+    if (!adminTokenOk(req)) return send(res, 403, { error: "invalid or unconfigured admin token" });
+    await setAutotradeHalted(true); notifyAutotrade("⏸️ Autobot paused from the dashboard — no new buys, still managing open positions."); return send(res, 200, { halted: true });
   }
   if (u.pathname === "/api/autotrade/resume" && req.method === "POST") {
-    if (!AUTOTRADE_ADMIN_TOKEN || req.headers["x-autotrade-admin-token"] !== AUTOTRADE_ADMIN_TOKEN) return send(res, 403, { error: "invalid or unconfigured admin token" });
-    await setAutotradeHalted(false); return send(res, 200, { halted: false });
+    if (rateLimited("admin:" + clientIp(req), 10)) return send(res, 429, { error: "too many attempts, wait a minute" });
+    if (!adminTokenOk(req)) return send(res, 403, { error: "invalid or unconfigured admin token" });
+    await setAutotradeHalted(false); autotradeFaulted = false; notifyAutotrade("▶️ Autobot resumed from the dashboard."); return send(res, 200, { halted: false });
   }
   if (u.pathname === "/api/autotrade/liquidate-all" && req.method === "POST") {
-    if (!AUTOTRADE_ADMIN_TOKEN || req.headers["x-autotrade-admin-token"] !== AUTOTRADE_ADMIN_TOKEN) return send(res, 403, { error: "invalid or unconfigured admin token" });
-    try { const closed = await liquidateAllAutotradePositions(); return send(res, 200, { closed }); } catch (e) { return send(res, 500, { error: e.message }); }
+    if (rateLimited("admin:" + clientIp(req), 10)) return send(res, 429, { error: "too many attempts, wait a minute" });
+    if (!adminTokenOk(req)) return send(res, 403, { error: "invalid or unconfigured admin token" });
+    try { const closed = await liquidateAllAutotradePositions(); notifyAutotrade("🚨 Autobot: 'Sell everything now' triggered from the dashboard — closed " + closed + " position(s)."); return send(res, 200, { closed }); } catch (e) { return send(res, 500, { error: e.message }); }
   }
   if (u.pathname === "/events") { res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform", "Connection": "keep-alive", "Access-Control-Allow-Origin": "*", "X-Accel-Buffering": "no" }); res.write(`event: snapshot\ndata: ${JSON.stringify([...tokens.values()])}\n\n`); clients.add(res); req.on("close", () => clients.delete(res)); return; }
   const f = path.join(PUBLIC, u.pathname === "/" ? "index.html" : u.pathname); if (!f.startsWith(PUBLIC)) return send(res, 403, { error: "forbidden" });
