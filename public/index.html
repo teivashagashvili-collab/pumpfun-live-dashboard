@@ -155,6 +155,15 @@ th.tip:hover::after{top:150%}
   </div>
 
   <section class="card" style="margin-bottom:12px">
+    <small class="muted">HOW IT TRADES</small>
+    <div class="statline"><span>Money per trade</span><b id="abMaxPerTrade">—</b></div>
+    <div class="statline"><span>Most it'll hold at once</span><b id="abMaxPositions">—</b></div>
+    <div class="statline"><span>Minimum score to buy</span><b id="abMinScore">—</b></div>
+    <div class="statline"><span>Stops buying for the day if it loses</span><b id="abDailyLossCapLine">—</b></div>
+    <p class="muted" style="font-size:11.5px;margin-top:10px">These are set in Railway, not on this page, so they can be tuned without a code change. <span class="tip" data-tip="No. It always uses the same fixed rules — the same score and safety checks as the rest of the site. It keeps a permanent record of every trade so you can see whether the rules actually work over time, but nothing here automatically changes its own behavior based on results.">Does it get smarter over time? →</span></p>
+  </section>
+
+  <section class="card" style="margin-bottom:12px">
     <small class="muted">THE BOT'S WALLET</small>
     <p id="abWalletAddr" class="muted" style="word-break:break-all;margin:4px 0 16px">Not set up yet.</p>
     <small class="muted">EMERGENCY CONTROLS</small>
@@ -530,6 +539,10 @@ th.tip:hover::after{top:150%}
     $("abPnl").textContent=d.realizedPnlTodaySol!=null?(d.realizedPnlTodaySol>=0?"+":"")+Number(d.realizedPnlTodaySol).toFixed(4)+" SOL (limit: -"+d.dailyLossCapSol+")":"—";
     $("abPnl").className="value "+(d.realizedPnlTodaySol>0?"pos":d.realizedPnlTodaySol<0?"neg":"");
     $("abOpenCount").textContent=(d.openPositions||[]).length+" of "+d.maxConcurrentPositions+" max";
+    $("abMaxPerTrade").textContent=d.maxSolPerTrade+" SOL";
+    $("abMaxPositions").textContent=d.maxConcurrentPositions+" coins at once";
+    $("abMinScore").textContent=d.minScore+" / 100";
+    $("abDailyLossCapLine").textContent=d.dailyLossCapSol+" SOL";
     $("abWalletAddr").textContent=d.walletAddress||"Not set up yet.";
     const pos=d.openPositions||[];
     $("abPositionRows").innerHTML=pos.length?pos.map(p=>{
