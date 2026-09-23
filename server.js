@@ -480,6 +480,128 @@ async function calibrationStats() {
   } catch (e) { console.error("calibrationStats failed:", e.message); return null; }
 }
 
+// ---- backtest: replay the autobot's exact exit rules over the scanner's logged history ----
+// Every qualified call in call_log is a would-be entry; token_observations holds the price path that
+// followed. Filters are chosen on the older 70% of calls and judged on the newest 30% only, so a
+// rule that merely fits the past doesn't look better than it is.
+const BACKTEST_COST_PCT = Number(process.env.BACKTEST_COST_PCT || 4); // round-trip fees + price impact on a small trade
+let lastBacktest = null;
+
+// path: [{ t: ms after entry, p: price }] ascending. Returns gross multiple on the position (1 = flat)
+// or null when there isn't enough data after entry to judge the trade.
+function simulateBacktestTrade(entry, path, stopPct, maxHoldMin) {
+  let remaining = 1, realized = 0, taken = 0;
+  const stopFor = k => (k === 0 ? 1 - stopPct / 100 : TP_LADDER[k - 1].stopAfter);
+  for (const pt of path) {
+    const m = pt.p / entry;
+    if (pt.t > maxHoldMin * 60000) return { gross: realized + remaining * m, reason: "time" };
+    if (m <= stopFor(taken)) return { gross: realized + remaining * m, reason: taken ? "trail" : "stop" };
+    while (taken < TP_LADDER.length && m >= TP_LADDER[taken].multiple) { realized += (TP_LADDER[taken].sellPct / 100) * m; remaining -= TP_LADDER[taken].sellPct / 100; taken++; }
+  }
+  const last = path[path.length - 1];
+  if (last && last.t >= 20 * 60000) return { gross: realized + remaining * (last.p / entry), reason: "data end" };
+  return null;
+}
+
+const BACKTEST_EXITS = [];
+for (const stopPct of [12, 20, 30]) for (const maxHoldMin of [60, 240]) BACKTEST_EXITS.push({ stopPct, maxHoldMin });
+const exitKey = e => e.stopPct + "/" + e.maxHoldMin;
+
+function backtestPasses(r, f) {
+  if (r.score < f.minScore) return false;
+  if (r.risk != null && r.risk >= 45) return false;
+  if (f.requireRisk && r.risk == null) return false;
+  if (f.minAgeMin && (r.ageMin == null || r.ageMin < f.minAgeMin)) return false;
+  if (f.maxPreM5 != null && (r.preM5 == null || r.preM5 > f.maxPreM5)) return false;
+  if (f.minLiq && r.liq < f.minLiq) return false;
+  if (f.minBuyRatio && (r.buyRatio == null || r.buyRatio < f.minBuyRatio)) return false;
+  return true;
+}
+
+function backtestAggregate(rows, f) {
+  let n = 0, wins = 0, sum = 0, unresolved = 0;
+  const key = exitKey(f);
+  for (const r of rows) {
+    if (!backtestPasses(r, f)) continue;
+    const net = r.nets[key];
+    if (net == null) { unresolved++; continue; }
+    n++; sum += net; if (net > 0) wins++;
+  }
+  return { n, winRatePct: n ? +(wins / n * 100).toFixed(1) : null, avgNetPct: n ? +(sum / n).toFixed(2) : null, unresolved };
+}
+
+async function runBacktest() {
+  if (!dbReady) return null;
+  const started = Date.now();
+  const calls = (await pool.query(
+    `SELECT mint, flagged_at, score, risk, entry_price, liquidity, buy_ratio, features FROM call_log
+     WHERE flagged_at > now() - interval '14 days' AND entry_price > 0 ORDER BY flagged_at`)).rows;
+  // One entry per mint per 12h, matching the bot's re-buy cooldown (call_log re-logs every 30 min).
+  const lastBy = new Map(), picks = [];
+  for (const c of calls) {
+    const ts = new Date(c.flagged_at).getTime(), l = lastBy.get(c.mint);
+    if (l && ts - l < 12 * 3600000) continue;
+    lastBy.set(c.mint, ts); picks.push({ ...c, ts });
+  }
+  const paths = new Map(), mints = [...new Set(picks.map(c => c.mint))];
+  for (let i = 0; i < mints.length; i += 200) {
+    const chunk = mints.slice(i, i + 200);
+    const r = await pool.query(`SELECT mint, ts, price FROM token_observations WHERE mint = ANY($1) AND ts > now() - interval '15 days' AND price > 0 ORDER BY mint, ts`, [chunk]);
+    for (const row of r.rows) { let a = paths.get(row.mint); if (!a) paths.set(row.mint, a = []); a.push([new Date(row.ts).getTime(), +row.price]); }
+  }
+  const rows = [];
+  for (const c of picks) {
+    const series = paths.get(c.mint) || [], entry = +c.entry_price;
+    const after = series.filter(([t]) => t > c.ts && t <= c.ts + 245 * 60000).map(([t, p]) => ({ t: t - c.ts, p }));
+    const before = series.filter(([t]) => t >= c.ts - 12 * 60000 && t <= c.ts - 2 * 60000);
+    let preM5 = null;
+    if (before.length) { const target = c.ts - 5 * 60000; const b = before.reduce((a, x) => Math.abs(x[0] - target) < Math.abs(a[0] - target) ? x : a); preM5 = (entry / b[1] - 1) * 100; }
+    const f = typeof c.features === "string" ? JSON.parse(c.features || "{}") : (c.features || {});
+    const nets = {};
+    for (const e of BACKTEST_EXITS) { const sim = simulateBacktestTrade(entry, after, e.stopPct, e.maxHoldMin); nets[exitKey(e)] = sim ? (sim.gross - 1) * 100 - BACKTEST_COST_PCT : null; }
+    rows.push({ ts: c.ts, score: +c.score || 0, risk: c.risk == null ? null : +c.risk, liq: +c.liquidity || 0, buyRatio: c.buy_ratio == null ? null : +c.buy_ratio,
+      ageMin: f.ageHours != null && f.ageHours < 9000 ? f.ageHours * 60 : null, preM5, nets });
+  }
+  rows.sort((a, b) => a.ts - b.ts);
+  const split = Math.floor(rows.length * 0.7), train = rows.slice(0, split), test = rows.slice(split);
+
+  const results = [];
+  for (const minScore of [72, 78, 85]) for (const requireRisk of [false, true]) for (const minAgeMin of [0, 15, 60])
+    for (const maxPreM5 of [null, 8, 0]) for (const minLiq of [0, 20000, 50000]) for (const minBuyRatio of [0, 0.55]) for (const e of BACKTEST_EXITS) {
+      const f = { minScore, requireRisk, minAgeMin, maxPreM5, minLiq, minBuyRatio, ...e };
+      const tr = backtestAggregate(train, f);
+      if (tr.n >= 20) results.push({ rule: f, train: tr });
+    }
+  results.sort((a, b) => b.train.avgNetPct - a.train.avgNetPct);
+  const top = results.slice(0, 8).map(x => ({ ...x, test: backtestAggregate(test, x.rule) }));
+
+  const liveRule = { minScore: AUTOTRADE_MIN_SCORE, requireRisk: AUTOTRADE_REQUIRE_SAFETY_DATA, minAgeMin: AUTOTRADE_MIN_PAIR_AGE_MIN, maxPreM5: AUTOTRADE_MAX_ENTRY_M5_PCT, minLiq: 0, minBuyRatio: 0, stopPct: 12, maxHoldMin: 240 };
+  const originalRule = { minScore: 78, requireRisk: false, minAgeMin: 0, maxPreM5: null, minLiq: 0, minBuyRatio: 0, stopPct: 12, maxHoldMin: 240 };
+  const both = r => ({ rule: r, train: backtestAggregate(train, r), test: backtestAggregate(test, r), all: backtestAggregate(rows, r) });
+
+  // One-dimension-at-a-time breakdown over ALL calls (score 72+, default exits) to show what matters.
+  const base = { minScore: 72, requireRisk: false, minAgeMin: 0, maxPreM5: null, minLiq: 0, minBuyRatio: 0, stopPct: 12, maxHoldMin: 240 };
+  const bucket = (label, pred) => { const sub = rows.filter(pred); return { label, ...backtestAggregate(sub, base) }; };
+  const breakdown = {
+    score: [bucket("72-77", r => r.score < 78), bucket("78-84", r => r.score >= 78 && r.score < 85), bucket("85-100", r => r.score >= 85)],
+    preM5: [bucket("<0%", r => r.preM5 != null && r.preM5 < 0), bucket("0-8%", r => r.preM5 != null && r.preM5 >= 0 && r.preM5 <= 8), bucket("8-20%", r => r.preM5 > 8 && r.preM5 <= 20), bucket(">20%", r => r.preM5 > 20), bucket("unknown", r => r.preM5 == null)],
+    ageMin: [bucket("<15m", r => r.ageMin != null && r.ageMin < 15), bucket("15-60m", r => r.ageMin >= 15 && r.ageMin < 60), bucket("1-6h", r => r.ageMin >= 60 && r.ageMin < 360), bucket(">6h", r => r.ageMin >= 360), bucket("unknown", r => r.ageMin == null)],
+    risk: [bucket("no data", r => r.risk == null), bucket("0-10", r => r.risk != null && r.risk <= 10), bucket("10-45", r => r.risk > 10 && r.risk < 45)],
+    liquidity: [bucket("<20k", r => r.liq < 20000), bucket("20-50k", r => r.liq >= 20000 && r.liq < 50000), bucket("50k+", r => r.liq >= 50000)],
+    buyRatio: [bucket("<0.55", r => r.buyRatio != null && r.buyRatio < 0.55), bucket("0.55+", r => r.buyRatio >= 0.55)]
+  };
+  lastBacktest = {
+    ranAt: new Date().toISOString(), tookMs: Date.now() - started, costPct: BACKTEST_COST_PCT,
+    calls: calls.length, entries: rows.length, trainEntries: train.length, testEntries: test.length,
+    firstEntry: rows[0] ? new Date(rows[0].ts).toISOString() : null, splitAt: test[0] ? new Date(test[0].ts).toISOString() : null,
+    original: both(originalRule), current: both(liveRule), best: top, breakdown
+  };
+  console.log("AUTOTRADE_BACKTEST_SUMMARY " + JSON.stringify({ ranAt: lastBacktest.ranAt, tookMs: lastBacktest.tookMs, calls: lastBacktest.calls, entries: lastBacktest.entries, train: train.length, test: test.length, firstEntry: lastBacktest.firstEntry, splitAt: lastBacktest.splitAt, original: lastBacktest.original, current: lastBacktest.current }));
+  console.log("AUTOTRADE_BACKTEST_BEST " + JSON.stringify(top));
+  console.log("AUTOTRADE_BACKTEST_BREAKDOWN " + JSON.stringify(breakdown));
+  return lastBacktest;
+}
+
 // Simulated equal-weighted paper portfolio: what your balance would look like if you'd taken
 // every logged call at a fixed notional and held to this timeframe's resolution, net of the same
 // assumed slippage already baked into net_1h/net_15m/net_5m. This is the same call_log data as
@@ -1813,6 +1935,8 @@ setInterval(() => {
 
 setInterval(() => resolveOutcomes().catch(e => console.error("resolveOutcomes failed:", e.message)), 2 * 60000);
 setInterval(() => pruneOldObservations().catch(e => console.error("pruneOldObservations failed:", e.message)), 6 * 60 * 60000); // every 6h
+setTimeout(() => runBacktest().catch(e => console.error("runBacktest failed:", e.message)), 90000);
+setInterval(() => runBacktest().catch(e => console.error("runBacktest failed:", e.message)), 6 * 60 * 60000);
 setInterval(() => autotradeCycle(), AUTOTRADE_LOOP_INTERVAL_MS);
 setInterval(() => autotradeHeartbeat(), 5 * 60000);
 setTimeout(() => autotradeHeartbeat(), 60000);
@@ -1836,6 +1960,7 @@ http.createServer(async (req, res) => {
   if (u.pathname === "/api/calls") return send(res, 200, getCalls().map(t => ({ ...t, tradePlan: tradePlan(t) })));
   if (u.pathname === "/api/plan") { const t = findToken(u.searchParams.get("q") || u.searchParams.get("mint") || ""); return send(res, 200, t ? { token: { mint: t.mint, name: t.name, symbol: t.symbol }, plan: tradePlan(t) } : { error: "Token not found" }); }
   if (u.pathname === "/api/performance") { const perf = await performanceStats(); return send(res, 200, perf || { error: "not available" }); }
+  if (u.pathname === "/api/backtest") return send(res, 200, lastBacktest || { status: "not run yet — runs ~90s after startup, then every 6h" });
   if (u.pathname === "/api/calibration") { const cal = await calibrationStats(); return send(res, 200, cal || []); }
   if (u.pathname === "/api/paper-track") { const tf = u.searchParams.get("timeframe") || "1h"; const pt = await paperTrackRecord(tf); return send(res, 200, pt || { error: "not available" }); }
   if (u.pathname === "/api/call-history") { return send(res, 200, await callHistory(u.searchParams.get("limit"))); }
