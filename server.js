@@ -45,6 +45,12 @@ const AUTOTRADE_MAX_HOLD_MINUTES = Number(process.env.AUTOTRADE_MAX_HOLD_MINUTES
 const AUTOTRADE_REBUY_COOLDOWN_HOURS = Number(process.env.AUTOTRADE_REBUY_COOLDOWN_HOURS || 12);
 const AUTOTRADE_MIN_SOL_RESERVE = Number(process.env.AUTOTRADE_MIN_SOL_RESERVE || 0.015); // kept back for fees + token-account rent
 const AUTOTRADE_MAX_SCORE_OFFSET = Number(process.env.AUTOTRADE_MAX_SCORE_OFFSET || 10);
+const AUTOTRADE_TP_SLIPPAGE_BPS = Number(process.env.AUTOTRADE_TP_SLIPPAGE_BPS || 500);
+// Entry filters, added after the first live trades: the losers were a 4-minute-old token with no
+// RugCheck data (rugged -89%) and buys right after an 18% five-minute spike (reversed immediately).
+const AUTOTRADE_REQUIRE_SAFETY_DATA = String(process.env.AUTOTRADE_REQUIRE_SAFETY_DATA || "true").toLowerCase() !== "false";
+const AUTOTRADE_MIN_PAIR_AGE_MIN = Number(process.env.AUTOTRADE_MIN_PAIR_AGE_MIN || 15);
+const AUTOTRADE_MAX_ENTRY_M5_PCT = Number(process.env.AUTOTRADE_MAX_ENTRY_M5_PCT || 8);
 // Profit-taking is measured against the bot's own entry price. After each rung, the stop is raised
 // (breakeven after the first) so a winner can't round-trip into a loss. The last 20% is a runner.
 const TP_LADDER = [
@@ -146,6 +152,7 @@ async function initDB() {
       );
       INSERT INTO autotrade_state(id) VALUES (1) ON CONFLICT (id) DO NOTHING;
       ALTER TABLE autotrade_positions ADD COLUMN IF NOT EXISTS entry_features JSONB;
+      ALTER TABLE autotrade_positions ADD COLUMN IF NOT EXISTS entry_exit_value_sol NUMERIC;
       ALTER TABLE autotrade_state ADD COLUMN IF NOT EXISTS min_score_offset NUMERIC NOT NULL DEFAULT 0;
       ALTER TABLE autotrade_state ADD COLUMN IF NOT EXISTS reviewed_closed_count INT NOT NULL DEFAULT 0;
     `);
@@ -1219,6 +1226,27 @@ async function walletSolBalance(owner) {
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// What selling rawAmount right now would actually return, per Jupiter. This is the real-time price
+// for held tokens: DexScreener's price lags by seconds, so in the first live trades stops were blown
+// straight through (a -15% trigger filled at -27%).
+async function exitValueSol(mint, rawAmount) {
+  if (!(rawAmount > 0)) return null;
+  const q = await jupiterQuote(mint, SOL_MINT, Math.floor(rawAmount), AUTOTRADE_EXIT_SLIPPAGE_BPS);
+  return q?.outAmount ? Number(q.outAmount) / 1e9 : null;
+}
+const positionMarks = new Map(); // position id -> { mult, source, at } — last valuation, for status/monitoring
+
+// Why a candidate that scores high enough still isn't bought (null = OK to buy).
+function entryFilterReason(t) {
+  const p = t.pair || {};
+  if (AUTOTRADE_REQUIRE_SAFETY_DATA && (t.rug?.scoreNormalized == null || t.rug?.top10HolderPct == null)) return "no safety data yet";
+  const ageMin = p.pairCreatedAt ? (Date.now() - p.pairCreatedAt) / 60000 : null;
+  if (ageMin == null || ageMin < AUTOTRADE_MIN_PAIR_AGE_MIN) return "too new";
+  if ((+p.priceChange?.m5 || 0) > AUTOTRADE_MAX_ENTRY_M5_PCT) return "chasing a spike";
+  if ((t.bundle?.sampledTxns ?? 0) >= 10 && (t.bundle?.clusterRatio ?? 0) >= 0.3) return "bundled launch";
+  return null;
+}
+
 // What the scanner saw at the moment of a buy. Logged again with the outcome (AUTOTRADE_RESULT) so
 // which signals actually predicted winners can be judged from real trades, not assumptions.
 function entryFeatures(t) {
@@ -1257,12 +1285,14 @@ async function openAutotradePosition(t) {
     if (!received) await sleep(1500);
   }
   const tokenRaw = received || Number(quote.outAmount);
+  let exitVal = null;
+  try { exitVal = await exitValueSol(t.mint, tokenRaw); } catch {}
   try {
     await dbRetry(() => dbTx(async c => {
       const r = await c.query(
-        `INSERT INTO autotrade_positions(mint,name,symbol,sol_spent,token_amount_raw,remaining_token_amount_raw,entry_price_usd,invalidation_price_usd,entry_features)
-         VALUES($1,$2,$3,$4,$5,$5,$6,$7,$8) RETURNING id`,
-        [t.mint, t.name || null, t.symbol || null, AUTOTRADE_MAX_SOL_PER_TRADE, tokenRaw, priceUsd, priceUsd ? priceUsd * (1 - AUTOTRADE_STOP_LOSS_PCT / 100) : null, JSON.stringify(features)]
+        `INSERT INTO autotrade_positions(mint,name,symbol,sol_spent,token_amount_raw,remaining_token_amount_raw,entry_price_usd,invalidation_price_usd,entry_features,entry_exit_value_sol)
+         VALUES($1,$2,$3,$4,$5,$5,$6,$7,$8,$9) RETURNING id`,
+        [t.mint, t.name || null, t.symbol || null, AUTOTRADE_MAX_SOL_PER_TRADE, tokenRaw, priceUsd, priceUsd ? priceUsd * (1 - AUTOTRADE_STOP_LOSS_PCT / 100) : null, JSON.stringify(features), exitVal]
       );
       await recordAutotradeTrade(r.rows[0].id, t.mint, t.symbol, "buy", AUTOTRADE_MAX_SOL_PER_TRADE, priceUsd, signature, "opened: score " + t.signal.score + "/100", c);
     }));
@@ -1323,7 +1353,7 @@ async function partialExitAutotradePosition(pos, tier) {
   const remaining = Number(pos.remaining_token_amount_raw);
   // Each rung sells a fixed share of the ORIGINAL position (20% each, leaving a 20% runner).
   const want = Math.min(remaining, Math.floor(Number(pos.token_amount_raw) * step.sellPct / 100));
-  const s = await sellHeldToken(pos, want, AUTOTRADE_SLIPPAGE_BPS);
+  const s = await sellHeldToken(pos, want, AUTOTRADE_TP_SLIPPAGE_BPS);
   if (s.none) { await closeAutotradePosition(pos, "take-profit +" + Math.round((step.multiple - 1) * 100) + "%"); return; }
   const newRemaining = Math.max(0, Math.min(remaining, s.onchain) - s.sold);
   const exitsTaken = [...(pos.exits_taken || []), tier];
@@ -1356,21 +1386,30 @@ async function partialExitAutotradePosition(pos, tier) {
 
 // One action per position per pass, so every automatic decision is its own auditable trade row.
 async function manageAutotradePosition(pos) {
-  // Re-price held tokens directly: the radar refreshes 500 tokens in rotation, so its price for any
-  // one token can be minutes old, far too stale to enforce a stop-loss on a memecoin.
-  let t = tokens.get(pos.mint);
-  try {
-    const fresh = await enrich(t || { mint: pos.mint, name: pos.name || "Unknown", symbol: pos.symbol || "TOKEN", uri: "", createdAt: Date.now() });
-    if (fresh?.pair) { tokens.set(pos.mint, fresh); t = fresh; }
-  } catch {}
-  const price = +t?.pair?.priceUsd || 0;
-  const entry = Number(pos.entry_price_usd) || 0;
   const heldMin = (Date.now() - new Date(pos.opened_at).getTime()) / 60000;
-  if (!price || !entry) {
+  // Primary valuation: what selling the remaining tokens would return right now, per token, relative
+  // to the same measurement taken right after the buy (so fees and price impact cancel out).
+  let mult = null, source = "quote";
+  const baseline = Number(pos.entry_exit_value_sol) || 0, remaining = Number(pos.remaining_token_amount_raw), original = Number(pos.token_amount_raw);
+  if (baseline > 0 && remaining > 0 && original > 0) {
+    try { const v = await exitValueSol(pos.mint, remaining); if (v != null) mult = (v / remaining) / (baseline / original); } catch {}
+  }
+  if (mult == null) {
+    // Fallback: DexScreener price, refreshed directly (the radar rotation can be minutes stale).
+    source = "dex";
+    let t = tokens.get(pos.mint);
+    try {
+      const fresh = await enrich(t || { mint: pos.mint, name: pos.name || "Unknown", symbol: pos.symbol || "TOKEN", uri: "", createdAt: Date.now() });
+      if (fresh?.pair) { tokens.set(pos.mint, fresh); t = fresh; }
+    } catch {}
+    const price = +t?.pair?.priceUsd || 0, entry = Number(pos.entry_price_usd) || 0;
+    if (price && entry) mult = price / entry;
+  }
+  if (mult == null) {
     if (heldMin >= AUTOTRADE_MAX_HOLD_MINUTES) await closeAutotradePosition(pos, "time stop after " + Math.round(heldMin) + " min (no live price)", true);
     return;
   }
-  const mult = price / entry;
+  positionMarks.set(pos.id, { mult, source, at: Date.now() });
   const taken = pos.exits_taken || [];
   const stopM = stopMultiple(taken);
   if (mult <= stopM) {
@@ -1449,8 +1488,10 @@ async function tryOpenNewPosition() {
   const recent = new Set((await pool.query("SELECT DISTINCT mint FROM autotrade_positions WHERE opened_at > now() - make_interval(hours => $1::int)", [Math.round(AUTOTRADE_REBUY_COOLDOWN_HOURS)])).rows.map(r => r.mint));
   for (const p of open) recent.add(p.mint);
   const minScore = effectiveMinScore(state);
-  const pick = getCalls().find(t => t.signal.score >= minScore && !recent.has(t.mint) && manipulationAdjustment(t) >= 0);
-  if (!pick) return "no new candidate scoring " + minScore + "+";
+  const scored = getCalls().filter(t => t.signal.score >= minScore && !recent.has(t.mint) && manipulationAdjustment(t) >= 0);
+  const skipped = {};
+  const pick = scored.find(t => { const r = entryFilterReason(t); if (r) { skipped[r] = (skipped[r] || 0) + 1; return false; } return true; });
+  if (!pick) return scored.length ? "skipped " + Object.entries(skipped).map(([k, v]) => v + " " + k).join(", ") : "no new candidate scoring " + minScore + "+";
   await openAutotradePosition(pick);
   return "bought " + (pick.symbol || pick.mint);
 }
@@ -1480,7 +1521,7 @@ async function autotradeHeartbeat() {
     const minScore = effectiveMinScore(st);
     console.log("AUTOTRADE_HB " + JSON.stringify({
       balanceSol: bal, pnlTodaySol: +st.realizedPnlTodaySol.toFixed(4), minScore, halted: st.halted, faulted: autotradeFaulted, route: routeCheck.ok,
-      open: open.map(p => { const px = +tokens.get(p.mint)?.pair?.priceUsd || 0, e = +p.entry_price_usd || 0; return { s: p.symbol, chgPct: px && e ? +((px / e - 1) * 100).toFixed(1) : null, tiers: p.exits_taken || [], min: Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60000) }; }),
+      open: open.map(p => { const m = positionMarks.get(p.id); return { s: p.symbol, chgPct: m ? +((m.mult - 1) * 100).toFixed(1) : null, src: m?.source || null, tiers: p.exits_taken || [], min: Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60000) }; }),
       lastBuy: lastBuySkipReason, candidatesAtMin: getCalls().filter(t => t.signal.score >= minScore).length
     }));
   } catch (e) { console.error("autotrade heartbeat failed:", e.message); }
@@ -1516,7 +1557,7 @@ async function autotradeStatusSummary() {
     return {
       mint: p.mint, name: p.name, symbol: p.symbol, openedAt: p.opened_at, solSpent: +p.sol_spent,
       entryPriceUsd: entry, currentPriceUsd: price, invalidationPriceUsd: entry ? entry * stopMultiple(p.exits_taken) : (p.invalidation_price_usd != null ? +p.invalidation_price_usd : null),
-      unrealizedChangePct: price && entry ? +(((price - entry) / entry) * 100).toFixed(2) : null,
+      unrealizedChangePct: positionMarks.get(p.id) ? +((positionMarks.get(p.id).mult - 1) * 100).toFixed(2) : price && entry ? +(((price - entry) / entry) * 100).toFixed(2) : null,
       realizedSol: +p.realized_sol, exitsTaken: p.exits_taken || []
     };
   });
