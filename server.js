@@ -206,6 +206,7 @@ async function initDB() {
       INSERT INTO autotrade_state(id) VALUES (2) ON CONFLICT (id) DO NOTHING;
       INSERT INTO autotrade_state(id) VALUES (3) ON CONFLICT (id) DO NOTHING;
       ALTER TABLE autotrade_positions ADD COLUMN IF NOT EXISTS peak_mult NUMERIC;
+      ALTER TABLE autotrade_positions ADD COLUMN IF NOT EXISTS fast_ref_price NUMERIC;
       ALTER TABLE autotrade_state ADD COLUMN IF NOT EXISTS min_score_offset NUMERIC NOT NULL DEFAULT 0;
       ALTER TABLE autotrade_state ADD COLUMN IF NOT EXISTS reviewed_closed_count INT NOT NULL DEFAULT 0;
       ALTER TABLE autotrade_state ADD COLUMN IF NOT EXISTS run_started_at TIMESTAMPTZ;
@@ -1802,7 +1803,7 @@ async function sellHeldToken(pos, wantRaw, slippageBps) {
 function logAutotradeResult(pos, realizedTotal, pnl, reason, exitsTaken) {
   const spent = Number(pos.sol_spent);
   console.log("AUTOTRADE_RESULT " + JSON.stringify({
-    mode: eng().mode, entryProfile: eng().entry.key, exitProfile: eng().exit.key, mint: pos.mint, symbol: pos.symbol, solSpent: spent, solBack: +realizedTotal.toFixed(6), pnlSol: +pnl.toFixed(6),
+    mode: eng().mode, entryProfile: eng().entry.key, exitProfile: eng().exit.key, exitTrigger: lastExitTrigger.get(pos.id) || null, mint: pos.mint, symbol: pos.symbol, solSpent: spent, solBack: +realizedTotal.toFixed(6), pnlSol: +pnl.toFixed(6),
     pnlPct: +((realizedTotal / spent - 1) * 100).toFixed(1), holdMin: Math.round((Date.now() - new Date(pos.opened_at).getTime()) / 60000),
     tiersTaken: exitsTaken || pos.exits_taken || [], reason, features: pos.entry_features || null
   }));
@@ -1879,7 +1880,9 @@ async function partialExitAutotradePosition(pos, tier) {
 }
 
 // One action per position per pass, so every automatic decision is its own auditable trade row.
-async function manageAutotradePosition(pos) {
+// opts.fast is set when the fast monitor (below) saw a stop or take-profit level cross.
+const lastExitTrigger = new Map(); // position id -> { source: "fast"|"poll", fastMultPct }
+async function manageAutotradePosition(pos, opts = {}) {
   const heldMin = (Date.now() - new Date(pos.opened_at).getTime()) / 60000;
   // Primary valuation: what selling the remaining tokens would return right now, per token, relative
   // to the same measurement taken right after the buy (so fees and price impact cancel out).
@@ -1909,7 +1912,9 @@ async function manageAutotradePosition(pos) {
   if (mult > peak) { peak = mult; try { await pool.query("UPDATE autotrade_positions SET peak_mult=$1 WHERE id=$2", [mult, pos.id]); } catch {} }
   const taken = pos.exits_taken || [];
   const stopM = stopMultiple(taken, peak);
+  const noteTrigger = () => lastExitTrigger.set(pos.id, { source: opts.fast ? "fast" : "poll", fastMultPct: opts.fastMult != null ? +((opts.fastMult - 1) * 100).toFixed(1) : null });
   if (mult <= stopM) {
+    noteTrigger();
     await closeAutotradePosition(pos, (taken.length ? "trailing stop" : "stop-loss") + " at " + ((mult - 1) * 100).toFixed(1) + "% from entry", true);
     return;
   }
@@ -1918,8 +1923,108 @@ async function manageAutotradePosition(pos) {
     return;
   }
   for (let i = 0; i < x.ladder.length; i++) {
-    if (!taken.includes(i) && mult >= x.ladder[i].multiple) { await partialExitAutotradePosition(pos, i); return; }
+    if (!taken.includes(i) && mult >= x.ladder[i].multiple) { noteTrigger(); await partialExitAutotradePosition(pos, i); return; }
   }
+}
+
+// ---- fast exit monitor ----
+// Polling Jupiter every 15s let stop-losses fill 5-50 points below their trigger: these coins move
+// that far in seconds. Every AUTOTRADE_FAST_MONITOR_MS (default 2s) this reads the price of every
+// held coin straight from chain state in ONE batched RPC call: the pump.fun bonding-curve account
+// (virtual reserves) before graduation, or the PumpSwap pool's two token vaults after. When a stop
+// or take-profit level is crossed it runs that position's normal management right away (which
+// re-prices with a real sell quote before acting). The 15s loop stays as the fallback for coins on
+// other DEXes and for time stops.
+const AUTOTRADE_FAST_MONITOR_MS = Number(process.env.AUTOTRADE_FAST_MONITOR_MS ?? 2000);
+const PUMP_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+const priceSources = new Map(); // mint -> { kind: "curve"|"pumpswap"|"none", accounts, invert, until }
+let fastBusy = false, fastBackoffUntil = 0, fastStats = { at: 0, open: 0, priced: 0, triggers: 0, kinds: {} };
+const u64 = (buf, off) => Number(buf.readBigUInt64LE(off));
+
+async function resolvePriceSource(mint) {
+  const cached = priceSources.get(mint);
+  if (cached && (cached.kind !== "none" || Date.now() < cached.until)) return cached;
+  const pair = tokens.get(mint)?.pair || {};
+  let src = { kind: "none", until: Date.now() + 60000 };
+  try {
+    if (pair.dexId === "pumpswap" && pair.pairAddress) {
+      const info = await rpcCall("getAccountInfo", [pair.pairAddress, { encoding: "base64", commitment: "confirmed" }]);
+      const data = info?.value?.data?.[0] ? Buffer.from(info.value.data[0], "base64") : null;
+      // PumpSwap Pool: disc(8) bump(1) index(2) creator(32) base_mint(32) quote_mint(32) lp_mint(32) base_vault(32) quote_vault(32)
+      if (data && data.length >= 203) {
+        const key = o => new PublicKey(data.subarray(o, o + 32)).toBase58();
+        const base = key(43), quote = key(75), baseVault = key(139), quoteVault = key(171);
+        if (base === mint && quote === SOL_MINT) src = { kind: "pumpswap", accounts: [baseVault, quoteVault], invert: false };
+        else if (quote === mint && base === SOL_MINT) src = { kind: "pumpswap", accounts: [baseVault, quoteVault], invert: true };
+      }
+    } else if (!pair.dexId || pair.dexId === "pumpfun") {
+      const pda = PublicKey.findProgramAddressSync([Buffer.from("bonding-curve"), new PublicKey(mint).toBuffer()], new PublicKey(PUMP_PROGRAM_ID))[0].toBase58();
+      src = { kind: "curve", accounts: [pda] };
+    }
+  } catch {}
+  priceSources.set(mint, src);
+  return src;
+}
+
+// SOL per raw token unit from the accounts' raw data, or null (and the source is re-resolved later,
+// e.g. after a curve completes and the coin moves to PumpSwap).
+function priceFromAccounts(mint, src, datas) {
+  try {
+    if (src.kind === "curve") {
+      const d = datas[0]; if (!d || d.length < 49) return null;
+      if (d[48] === 1) { priceSources.delete(mint); return null; } // curve complete: migrated
+      const vTok = u64(d, 8), vSol = u64(d, 16);
+      return vTok > 0 && vSol > 0 ? vSol / vTok : null;
+    }
+    if (src.kind === "pumpswap") {
+      const [b, q] = datas; if (!b || !q || b.length < 72 || q.length < 72) return null;
+      const baseAmt = u64(b, 64), quoteAmt = u64(q, 64);
+      if (!(baseAmt > 0 && quoteAmt > 0)) return null;
+      return src.invert ? baseAmt / quoteAmt : quoteAmt / baseAmt;
+    }
+  } catch {}
+  return null;
+}
+
+async function fastMonitorTick() {
+  if (!AUTOTRADE_ENABLED || !dbReady || fastBusy || Date.now() < fastBackoffUntil) return;
+  fastBusy = true;
+  try {
+    const open = (await pool.query("SELECT * FROM autotrade_positions WHERE status='open'")).rows.filter(p => ENGINES[p.mode]);
+    if (!open.length) return;
+    const mints = [...new Set(open.map(p => p.mint))], srcs = new Map();
+    for (const m of mints) { const s = await resolvePriceSource(m); if (s.kind !== "none") srcs.set(m, s); }
+    const accounts = [...new Set([...srcs.values()].flatMap(s => s.accounts))].slice(0, 100);
+    if (!accounts.length) return;
+    const res = await rpcCall("getMultipleAccounts", [accounts, { encoding: "base64", commitment: "processed" }], 5000);
+    const byKey = new Map(accounts.map((a, i) => [a, res?.value?.[i]?.data?.[0] ? Buffer.from(res.value[i].data[0], "base64") : null]));
+    const prices = new Map();
+    for (const [m, s] of srcs) { const px = priceFromAccounts(m, s, s.accounts.map(a => byKey.get(a))); if (px) prices.set(m, px); }
+    const kinds = {}; for (const m of mints) { const k = prices.has(m) ? srcs.get(m).kind : (priceSources.get(m)?.kind || "none") + "-unpriced"; kinds[k] = (kinds[k] || 0) + 1; }
+    fastStats = { at: Date.now(), open: open.length, priced: open.filter(p => prices.has(p.mint)).length, triggers: fastStats.triggers, kinds };
+    for (const pos of open) {
+      const px = prices.get(pos.mint); if (!px) continue;
+      let ref = Number(pos.fast_ref_price) || 0;
+      if (!ref) { ref = px; await pool.query("UPDATE autotrade_positions SET fast_ref_price=$1 WHERE id=$2 AND fast_ref_price IS NULL", [px, pos.id]); continue; }
+      const mult = px / ref;
+      await runInEngine(pos.mode, async () => {
+        const x = eng().exit, taken = pos.exits_taken || [];
+        const peak = Math.max(1, Number(pos.peak_mult) || 1, mult);
+        const hitStop = mult <= stopMultiple(taken, peak);
+        const hitRung = x.ladder.some((r, i) => !taken.includes(i) && mult >= r.multiple);
+        if (!hitStop && !hitRung) return;
+        fastStats.triggers++;
+        await withAutotradeLock(async () => {
+          // Re-read: the regular loop may have acted on this position a moment ago.
+          const fresh = (await pool.query("SELECT * FROM autotrade_positions WHERE id=$1 AND status='open'", [pos.id])).rows[0];
+          if (fresh) await manageAutotradePosition(fresh, { fast: true, fastMult: mult });
+        });
+      });
+    }
+  } catch (e) {
+    fastBackoffUntil = Date.now() + 30000; // RPC rate limits: back off, the 15s loop still covers everything
+    console.error("fast monitor failed (pausing 30s):", e.message);
+  } finally { fastBusy = false; }
 }
 
 // "More accurate over time", done conservatively: every 10 closed trades, if fewer than 4 made money
@@ -2044,6 +2149,7 @@ async function autotradeHeartbeat() {
       mode: eng().mode, balanceSol: bal, pnlTodaySol: +st.realizedPnlTodaySol.toFixed(4), minScore, halted: st.halted, faulted: eng().faulted, route: routeCheck.ok,
       open: open.map(p => { const m = positionMarks.get(p.id); return { s: p.symbol, chgPct: m ? +((m.mult - 1) * 100).toFixed(1) : null, src: m?.source || null, tiers: p.exits_taken || [], min: Math.round((Date.now() - new Date(p.opened_at).getTime()) / 60000) }; }),
       ...(eng().paper || !AUTOTRADE_RUN_LOSS_CAP_SOL ? {} : { runPnlSol: +(await liveRunPnlSol()).toFixed(4) }),
+      fast: fastStats.at ? { ageS: Math.round((Date.now() - fastStats.at) / 1000), open: fastStats.open, priced: fastStats.priced, triggers: fastStats.triggers, kinds: fastStats.kinds } : null,
       lastBuy: eng().lastBuySkipReason, candidatesAtMin: getCalls().filter(t => t.signal.score >= minScore).length
     }));
   } catch (e) { console.error("autotrade heartbeat failed:", e.message); }
@@ -2360,6 +2466,7 @@ setTimeout(() => {
   }, { wait: true })).catch(e => console.error("rent reclaim sweep failed:", e.message));
 }, 120000);
 setInterval(() => runBacktest().catch(e => console.error("runBacktest failed:", e.message)), 6 * 60 * 60000);
+if (AUTOTRADE_FAST_MONITOR_MS > 0) setInterval(() => fastMonitorTick(), Math.max(1000, AUTOTRADE_FAST_MONITOR_MS));
 for (const mode of AUTOTRADE_MODES) {
   setInterval(() => runInEngine(mode, autotradeCycle), AUTOTRADE_LOOP_INTERVAL_MS);
   setInterval(() => runInEngine(mode, autotradeHeartbeat), 5 * 60000);
