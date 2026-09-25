@@ -569,8 +569,8 @@ th.tip:hover::after{top:150%}
     const prs=Array.isArray(d.practice)?d.practice.filter(p=>!p.error):[];
     $("abPracticeCards").innerHTML=prs.map(pr=>{
       const cs=pr.closedStats||{}, pnl=cs.pnlSol;
-      return '<section class="card" style="margin-bottom:12px"><small class="muted">PRACTICE — '+esc((pr.exitLabel||"strategy").toUpperCase())+' — PRETEND MONEY</small>'+
-        '<p class="muted" style="font-size:12px;margin:4px 0 8px">'+esc(pr.exitDescribe||"")+'. Same live prices and coins as the other practice account, with no real SOL involved.</p>'+
+      return '<section class="card" style="margin-bottom:12px"><small class="muted">PRACTICE — '+esc(((pr.entryLabel?pr.entryLabel+" + ":"")+(pr.exitLabel||"strategy")).toUpperCase())+' — PRETEND MONEY</small>'+
+        '<p class="muted" style="font-size:12px;margin:4px 0 8px"><b>Buys:</b> '+esc(pr.entryDescribe||"")+'.<br><b>Sells:</b> '+esc(pr.exitDescribe||"")+'.<br>Live prices, no real SOL involved.</p>'+
         '<div class="statline"><span>Pretend balance</span><b>'+(pr.solBalance!=null?Number(pr.solBalance).toFixed(4)+" SOL":"—")+'</b></div>'+
         '<div class="statline"><span>Finished trades this run</span><b>'+(cs.trades!=null?cs.trades+" ("+cs.winners+" made money)":"—")+'</b></div>'+
         '<div class="statline"><span>Result this run</span><b>'+(pnl!=null?'<span class="'+(pnl>=0?"pos":"neg")+'">'+(pnl>=0?"+":"")+Number(pnl).toFixed(4)+" SOL</span>":"—")+'</b></div>'+

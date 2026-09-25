@@ -88,6 +88,23 @@ function exitProfileFor(mode) {
   const key = String(process.env[{ live: "AUTOTRADE_EXIT_PROFILE", paper: "AUTOTRADE_PAPER_EXIT_PROFILE", paper2: "AUTOTRADE_PAPER2_EXIT_PROFILE" }[mode]] || "ladder").toLowerCase();
   return { key: EXIT_PROFILES[key] ? key : "ladder", ...(EXIT_PROFILES[key] || EXIT_PROFILES.ladder) };
 }
+// Entry rules are also a named profile per engine. "classic" is the original behavior (live safety
+// filters; practice buys every qualified call unless AUTOTRADE_PAPER_FILTERS). The others come from
+// the entry research over ~1,000 logged calls (22-25 Sep), where each held up in all three time slices:
+//   youngRising: pair under 5 min old, price up over the last 5 min, under 3,000 trades in the last hour
+//     (quick-profit exit: +7.5%/trade, thirds +12.7/+4.1/+6.8, n=228).
+//   breakout: price within 3% of its 30-minute high, under 3,000 trades in the last hour
+//     (free-ride exit: +10.4%/trade, thirds +10.7/+7.3/+14.3, n=204).
+const ENTRY_PROFILES = {
+  classic: { label: "Classic", describe: "any coin scoring " + AUTOTRADE_MIN_SCORE + "+", minScore: AUTOTRADE_MIN_SCORE },
+  youngRising: { label: "Young & rising", describe: "coins under 5 min old, rising over the last 5 min, under 3,000 trades in the past hour", minScore: 72 },
+  breakout: { label: "Breakout", describe: "coins trading at their 30-minute high, under 3,000 trades in the past hour", minScore: 72 }
+};
+function entryProfileFor(mode) {
+  const raw = String(process.env[{ live: "AUTOTRADE_ENTRY_PROFILE", paper: "AUTOTRADE_PAPER_ENTRY_PROFILE", paper2: "AUTOTRADE_PAPER2_ENTRY_PROFILE" }[mode]] || "classic").toLowerCase();
+  const key = Object.keys(ENTRY_PROFILES).find(k => k.toLowerCase() === raw) || "classic";
+  return { key, ...ENTRY_PROFILES[key] };
+}
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 
 const pool = process.env.DATABASE_URL
@@ -1410,7 +1427,7 @@ const { AsyncLocalStorage } = require("async_hooks");
 const autotradeCtx = new AsyncLocalStorage();
 function makeEngine(mode) {
   const paper = mode !== "live";
-  return { mode, paper, stateId: { live: 1, paper: 2, paper2: 3 }[mode], exit: exitProfileFor(mode), maxPositions: paper ? AUTOTRADE_PAPER_MAX_CONCURRENT_POSITIONS : AUTOTRADE_MAX_CONCURRENT_POSITIONS,
+  return { mode, paper, stateId: { live: 1, paper: 2, paper2: 3 }[mode], exit: exitProfileFor(mode), entry: entryProfileFor(mode), maxPositions: paper ? AUTOTRADE_PAPER_MAX_CONCURRENT_POSITIONS : AUTOTRADE_MAX_CONCURRENT_POSITIONS,
     heldMints: new Set(), faulted: false, busy: false, lossCapNotifiedDay: "", lastBuyAttemptAt: 0, lastBuySkipReason: "not started yet", lowBalanceNotifiedAt: 0 };
 }
 const ENGINES = Object.fromEntries(AUTOTRADE_MODES.map(m => [m, makeEngine(m)]));
@@ -1674,9 +1691,33 @@ async function exitValueSol(mint, rawAmount) {
 const positionMarks = new Map(); // position id -> { mult, source, at } — last valuation, for status/monitoring
 
 // Why a candidate that scores high enough still isn't bought (null = OK to buy).
+// Where the price sits against its own recent high, from the in-memory price history (null if there
+// aren't at least 3 readings in the window). 1.0 = at the high.
+function rangePosition(t, windowMin = 30) {
+  const price = +t.pair?.priceUsd || 0, since = Date.now() - windowMin * 60000;
+  const pts = (history.get(t.mint) || []).filter(h => h.ts >= since && h.price > 0);
+  if (!price || pts.length < 3) return null;
+  return price / Math.max(price, ...pts.map(h => h.price));
+}
 function entryFilterReason(t) {
+  const en = eng().entry, p = t.pair || {};
+  if (en.key !== "classic") {
+    if (t.rug?.rugged || (t.rug?.scoreNormalized ?? 0) >= 45) return "high rug risk";
+    const trades = (+p.txns?.h1?.buys || 0) + (+p.txns?.h1?.sells || 0);
+    if (trades >= 3000) return "too busy (3k+ trades/h)";
+    if (en.key === "youngRising") {
+      const ageMin = p.pairCreatedAt ? (Date.now() - p.pairCreatedAt) / 60000 : null;
+      if (ageMin == null || ageMin >= 5) return "older than 5 min";
+      if (!((+p.priceChange?.m5 || 0) > 0)) return "not rising";
+    }
+    if (en.key === "breakout") {
+      const pos = rangePosition(t, 30);
+      if (pos == null) return "not enough price history";
+      if (pos < 0.97) return "below its 30-min high";
+    }
+    return null;
+  }
   if (eng().paper && !AUTOTRADE_PAPER_FILTERS) return null;
-  const p = t.pair || {};
   if (AUTOTRADE_REQUIRE_SAFETY_DATA && (t.rug?.scoreNormalized == null || t.rug?.top10HolderPct == null)) return "no safety data yet";
   const ageMin = p.pairCreatedAt ? (Date.now() - p.pairCreatedAt) / 60000 : null;
   if (ageMin == null || ageMin < AUTOTRADE_MIN_PAIR_AGE_MIN) return "too new";
@@ -1699,7 +1740,7 @@ function entryFeatures(t) {
   };
 }
 
-function effectiveMinScore(state) { return AUTOTRADE_MIN_SCORE + (state?.minScoreOffset || 0); }
+function effectiveMinScore(state) { return (eng().entry?.minScore ?? AUTOTRADE_MIN_SCORE) + (state?.minScoreOffset || 0); }
 
 // Stop level as a multiple of entry: the initial stop-loss, raised after each profit-take rung.
 function stopMultiple(exitsTaken, peak = 1) {
@@ -1759,7 +1800,7 @@ async function sellHeldToken(pos, wantRaw, slippageBps) {
 function logAutotradeResult(pos, realizedTotal, pnl, reason, exitsTaken) {
   const spent = Number(pos.sol_spent);
   console.log("AUTOTRADE_RESULT " + JSON.stringify({
-    mode: eng().mode, exitProfile: eng().exit.key, mint: pos.mint, symbol: pos.symbol, solSpent: spent, solBack: +realizedTotal.toFixed(6), pnlSol: +pnl.toFixed(6),
+    mode: eng().mode, entryProfile: eng().entry.key, exitProfile: eng().exit.key, mint: pos.mint, symbol: pos.symbol, solSpent: spent, solBack: +realizedTotal.toFixed(6), pnlSol: +pnl.toFixed(6),
     pnlPct: +((realizedTotal / spent - 1) * 100).toFixed(1), holdMin: Math.round((Date.now() - new Date(pos.opened_at).getTime()) / 60000),
     tiersTaken: exitsTaken || pos.exits_taken || [], reason, features: pos.entry_features || null
   }));
@@ -1902,12 +1943,12 @@ async function reviewStrictness() {
       else if (winRate >= 0.6) offset = Math.max(0, offset - 1);
     }
     await pool.query("UPDATE autotrade_state SET min_score_offset=$1, reviewed_closed_count=$2 WHERE id=" + eng().stateId, [offset, closed]);
-    console.log("AUTOTRADE_REVIEW " + JSON.stringify({ window: last.length, wins, winRate, offsetBefore: before, offsetAfter: offset, minScore: AUTOTRADE_MIN_SCORE + offset }));
+    console.log("AUTOTRADE_REVIEW " + JSON.stringify({ window: last.length, wins, winRate, offsetBefore: before, offsetAfter: offset, minScore: eng().entry.minScore + offset }));
     if (eng().paper) {
       const tot = (await pool.query("SELECT COUNT(*)::int n, COUNT(*) FILTER (WHERE realized_pnl_sol > 0)::int w, COALESCE(SUM(realized_pnl_sol),0) pnl FROM autotrade_positions WHERE mode=$1 AND status='closed' AND closed_at >= (SELECT run_started_at FROM autotrade_state WHERE id=$2)", [eng().mode, eng().stateId])).rows[0];
       const avgPct = last.reduce((a, r) => a + Number(r.realized_pnl_sol) / Number(r.sol_spent), 0) / last.length * 100;
-      notifyAutotrade("📝 Practice \"" + eng().exit.label + "\" update: " + tot.n + " practice trades so far, " + tot.w + " made money, total " + (Number(tot.pnl) >= 0 ? "+" : "") + Number(tot.pnl).toFixed(4) + " SOL. Last " + last.length + ": " + wins + " winners, average " + (avgPct >= 0 ? "+" : "") + avgPct.toFixed(1) + "% per trade. Minimum score now " + (AUTOTRADE_MIN_SCORE + offset) + ".");
-    } else if (offset !== before) notifyAutotrade("🎯 Autobot review of its last " + last.length + " trades: " + wins + " made money. Minimum score to buy is now " + (AUTOTRADE_MIN_SCORE + offset) + " (was " + (AUTOTRADE_MIN_SCORE + before) + ").");
+      notifyAutotrade("📝 Practice \"" + eng().entry.label + " + " + eng().exit.label + "\" update: " + tot.n + " practice trades so far, " + tot.w + " made money, total " + (Number(tot.pnl) >= 0 ? "+" : "") + Number(tot.pnl).toFixed(4) + " SOL. Last " + last.length + ": " + wins + " winners, average " + (avgPct >= 0 ? "+" : "") + avgPct.toFixed(1) + "% per trade. Minimum score now " + (eng().entry.minScore + offset) + ".");
+    } else if (offset !== before) notifyAutotrade("🎯 Autobot review of its last " + last.length + " trades: " + wins + " made money. Minimum score to buy is now " + (eng().entry.minScore + offset) + " (was " + (eng().entry.minScore + before) + ").");
   } catch (e) { console.error("reviewStrictness failed:", e.message); }
 }
 
@@ -2027,7 +2068,7 @@ function adminTokenOk(req) {
 async function autotradeStatusSummary() {
   const kp = loadAutotradeKeypair();
   const e = eng();
-  const base = { mode: e.mode, modes: AUTOTRADE_MODES, enabled: AUTOTRADE_ENABLED, configured: !!kp, live: AUTOTRADE_ENABLED && !!kp, faulted: e.faulted, routeCheck, usingDefaultRpc: !process.env.SOLANA_RPC_URL, alertsConfigured: !!(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID), maxSolPerTrade: AUTOTRADE_MAX_SOL_PER_TRADE, maxConcurrentPositions: e.maxPositions, runLossCapSol: e.paper ? null : AUTOTRADE_RUN_LOSS_CAP_SOL, dailyLossCapSol: AUTOTRADE_DAILY_LOSS_CAP_SOL, minScore: AUTOTRADE_MIN_SCORE, baseMinScore: AUTOTRADE_MIN_SCORE, minScoreOffset: 0, exitProfile: e.exit.key, exitLabel: e.exit.label, exitDescribe: e.exit.describe, stopLossPct: e.exit.stopPct, trailPct: e.exit.trailPct || null, maxHoldMinutes: e.exit.maxHoldMin, tpLadder: e.exit.ladder.map(x => ({ gainPct: Math.round((x.multiple - 1) * 100), sellPct: x.sellPct })), lastCheck: e.lastBuySkipReason };
+  const base = { mode: e.mode, modes: AUTOTRADE_MODES, enabled: AUTOTRADE_ENABLED, configured: !!kp, live: AUTOTRADE_ENABLED && !!kp, faulted: e.faulted, routeCheck, usingDefaultRpc: !process.env.SOLANA_RPC_URL, alertsConfigured: !!(TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID), maxSolPerTrade: AUTOTRADE_MAX_SOL_PER_TRADE, maxConcurrentPositions: e.maxPositions, runLossCapSol: e.paper ? null : AUTOTRADE_RUN_LOSS_CAP_SOL, dailyLossCapSol: AUTOTRADE_DAILY_LOSS_CAP_SOL, minScore: e.entry.minScore, baseMinScore: e.entry.minScore, minScoreOffset: 0, entryProfile: e.entry.key, entryLabel: e.entry.label, entryDescribe: e.entry.describe, exitProfile: e.exit.key, exitLabel: e.exit.label, exitDescribe: e.exit.describe, stopLossPct: e.exit.stopPct, trailPct: e.exit.trailPct || null, maxHoldMinutes: e.exit.maxHoldMin, tpLadder: e.exit.ladder.map(x => ({ gainPct: Math.round((x.multiple - 1) * 100), sellPct: x.sellPct })), lastCheck: e.lastBuySkipReason };
   if (!kp) return { ...base, walletAddress: null, solBalance: null, halted: null, realizedPnlTodaySol: null, openPositions: [], recentTrades: [] };
   let solBalance = null;
   let realSolBalance = null;
@@ -2322,7 +2363,7 @@ for (const mode of AUTOTRADE_MODES) {
   setInterval(() => runInEngine(mode, autotradeHeartbeat), 5 * 60000);
   setTimeout(() => runInEngine(mode, autotradeHeartbeat), 60000);
 }
-console.log("Autotrade engines: " + AUTOTRADE_MODES.map(m => m + " [" + ENGINES[m].exit.key + "]").join(" + ") + (AUTOTRADE_ENABLED ? "" : " (AUTOTRADE_ENABLED is off)"));
+console.log("Autotrade engines: " + AUTOTRADE_MODES.map(m => m + " [" + ENGINES[m].entry.key + " / " + ENGINES[m].exit.key + "]").join(" + ") + (AUTOTRADE_ENABLED ? "" : " (AUTOTRADE_ENABLED is off)"));
 setTimeout(() => checkTradingRoute().catch(e => console.error("checkTradingRoute failed:", e.message)), 5000);
 // Re-check every 10 min while broken (so it recovers on its own), otherwise every 6h.
 setInterval(() => {
@@ -2338,13 +2379,18 @@ async function applyPaperReset() {
   if (!dbReady || !key) return;
   for (const e of Object.values(ENGINES).filter(x => x.paper)) {
     try {
+      const pending = await pool.query("SELECT 1 FROM autotrade_state WHERE id=$1 AND paper_reset_key IS DISTINCT FROM $2", [e.stateId, key]);
+      if (!pending.rowCount) continue;
+      // Pretend positions still open from the previous run are dropped (no P&L recorded, closed
+      // before the new run starts), so they can't leak into the fresh run's balance or results.
+      await pool.query("UPDATE autotrade_positions SET status='closed', closed_at=now(), remaining_token_amount_raw=0, realized_pnl_sol=NULL, close_reason='dropped at practice reset' WHERE mode=$1 AND status='open'", [e.mode]);
       const r = await pool.query(
         `UPDATE autotrade_state SET paper_balance_sol=$1, min_score_offset=0, run_started_at=now(), halted=false, paper_reset_key=$2,
            reviewed_closed_count=(SELECT COUNT(*) FROM autotrade_positions WHERE mode=$3 AND status='closed' AND realized_pnl_sol IS NOT NULL)
          WHERE id=$4 AND paper_reset_key IS DISTINCT FROM $2 RETURNING id`, [AUTOTRADE_PAPER_START_SOL, key, e.mode, e.stateId]);
       if (r.rowCount) {
         console.log("Practice account " + e.mode + " (" + e.exit.label + ") reset to " + AUTOTRADE_PAPER_START_SOL + " SOL (reset key " + key + ")");
-        sendTelegramText("📝 Practice account \"" + e.exit.label + "\" (" + e.exit.describe + ") reset to " + AUTOTRADE_PAPER_START_SOL + " pretend SOL. A fresh practice run starts now.").catch(() => {});
+        sendTelegramText("📝 Practice account \"" + e.entry.label + " + " + e.exit.label + "\" (buys " + e.entry.describe + "; " + e.exit.describe + ") reset to " + AUTOTRADE_PAPER_START_SOL + " pretend SOL. A fresh practice run starts now.").catch(() => {});
       }
     } catch (err) { console.error("paper reset failed:", e.mode, err.message); }
   }
