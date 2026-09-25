@@ -154,14 +154,7 @@ th.tip:hover::after{top:150%}
     <div class="card"><div class="kpi-label tip" data-tip="How many different coins the bot currently owns, out of the most it's allowed to hold at once.">Currently holding</div><div id="abOpenCount" class="value" style="font-size:16px">—</div></div>
   </div>
 
-  <section id="abPracticeCard" class="card" style="margin-bottom:12px;display:none">
-    <small class="muted">PRACTICE RUN — PRETEND MONEY, RUNNING ALONGSIDE</small>
-    <p class="muted" style="font-size:12px;margin:4px 0 8px">The same bot on the same live prices, trading every qualified coin with pretend SOL and without the extra safety filters, so you can compare. None of this touches the real wallet.</p>
-    <div class="statline"><span>Pretend balance</span><b id="abPracBalance">—</b></div>
-    <div class="statline"><span>Finished practice trades</span><b id="abPracTrades">—</b></div>
-    <div class="statline"><span>Total result</span><b id="abPracPnl">—</b></div>
-    <div class="statline"><span>Holding now</span><b id="abPracOpen">—</b></div>
-  </section>
+  <div id="abPracticeCards"></div>
 
   <section class="card" style="margin-bottom:12px">
     <small class="muted">HOW IT TRADES</small>
@@ -549,6 +542,13 @@ th.tip:hover::after{top:150%}
     return{text:"Live — real money",cls:"",sub:"Actively buying and selling on its own, right now."};
   }
 
+  function abTpText(d){
+    const l=d.tpLadder||[];
+    if(!l.length)return "—";
+    const same=l.every(x=>x.sellPct===l[0].sellPct);
+    return l.map(x=>"+"+x.gainPct+"%"+(same?"":" (sells "+x.sellPct+"%)")).join(", ")+(same?" (sells "+l[0].sellPct+"% "+(l.length>1?"each":"")+")":"")+(d.trailPct?", then the rest when it falls "+d.trailPct+"% from its high":"");
+  }
+
   function renderAutobot(d){
     $("autobotSetup").style.display=d.configured?"none":"";
     const st=abStatusInfo(d);
@@ -560,21 +560,22 @@ th.tip:hover::after{top:150%}
     $("abMaxPerTrade").textContent=d.maxSolPerTrade+" SOL";
     $("abMaxPositions").textContent=d.maxConcurrentPositions+" coins at once";
     $("abMinScore").textContent=d.minScore+" / 100"+(d.minScoreOffset>0?" (auto-raised +"+d.minScoreOffset+" after a losing streak)":"");
-    $("abStopLine").textContent=d.stopLossPct!=null?"-"+d.stopLossPct+"% from what it paid":"—";
-    $("abTpLine").textContent=(d.tpLadder||[]).map(x=>"+"+x.gainPct+"%").join(", ")+((d.tpLadder||[]).length?" ("+d.tpLadder[0].sellPct+"% each)":"");
+    $("abStopLine").textContent=d.stopLossPct!=null?"-"+d.stopLossPct+"% from what it paid":"no fixed stop-loss";
+    $("abTpLine").textContent=abTpText(d);
     $("abHoldLine").textContent=d.maxHoldMinutes!=null?(d.maxHoldMinutes>=60?(d.maxHoldMinutes/60)+" hours":d.maxHoldMinutes+" min"):"—";
     $("abLastCheck").textContent=d.live?(d.lastCheck||"—"):"bot is off";
     $("abDailyLossCapLine").textContent=d.dailyLossCapSol+" SOL";
     $("abRunCapLine").textContent=d.runLossCapSol?d.runLossCapSol+" SOL"+(d.runPnlSol!=null?" (this run so far: "+(d.runPnlSol>=0?"+":"")+Number(d.runPnlSol).toFixed(4)+" SOL)":""):(d.mode==="paper"?"— (practice only)":"off");
-    const pr=d.practice;
-    $("abPracticeCard").style.display=pr&&!pr.error?"":"none";
-    if(pr&&!pr.error){
-      const cs=pr.closedStats||{};
-      $("abPracBalance").textContent=pr.solBalance!=null?Number(pr.solBalance).toFixed(4)+" SOL (pretend)":"—";
-      $("abPracTrades").textContent=cs.trades!=null?cs.trades+" ("+cs.winners+" made money)":"—";
-      $("abPracPnl").innerHTML=cs.pnlSol!=null?'<span class="'+(cs.pnlSol>=0?"pos":"neg")+'">'+(cs.pnlSol>=0?"+":"")+Number(cs.pnlSol).toFixed(4)+" SOL</span>":"—";
-      $("abPracOpen").textContent=(pr.openPositions||[]).length+" coin(s)"+(pr.halted?" · paused":"");
-    }
+    const prs=Array.isArray(d.practice)?d.practice.filter(p=>!p.error):[];
+    $("abPracticeCards").innerHTML=prs.map(pr=>{
+      const cs=pr.closedStats||{}, pnl=cs.pnlSol;
+      return '<section class="card" style="margin-bottom:12px"><small class="muted">PRACTICE — '+esc((pr.exitLabel||"strategy").toUpperCase())+' — PRETEND MONEY</small>'+
+        '<p class="muted" style="font-size:12px;margin:4px 0 8px">'+esc(pr.exitDescribe||"")+'. Same live prices and coins as the other practice account, with no real SOL involved.</p>'+
+        '<div class="statline"><span>Pretend balance</span><b>'+(pr.solBalance!=null?Number(pr.solBalance).toFixed(4)+" SOL":"—")+'</b></div>'+
+        '<div class="statline"><span>Finished trades this run</span><b>'+(cs.trades!=null?cs.trades+" ("+cs.winners+" made money)":"—")+'</b></div>'+
+        '<div class="statline"><span>Result this run</span><b>'+(pnl!=null?'<span class="'+(pnl>=0?"pos":"neg")+'">'+(pnl>=0?"+":"")+Number(pnl).toFixed(4)+" SOL</span>":"—")+'</b></div>'+
+        '<div class="statline"><span>Holding now</span><b>'+(pr.openPositions||[]).length+" coin(s)"+(pr.halted?" · paused":"")+'</b></div></section>';
+    }).join("");
     const rc=d.routeCheck||{};
     $("abRoute").innerHTML=rc.ok===true?'<span class="pos">Working'+(rc.swapBuildOk?' (practice trade built)':' (price check only — add the wallet to test a full trade)')+'</span>':rc.ok===false?'<span class="neg">Not working</span>':'<span class="muted">Checking…</span>';
     const notes=[];
