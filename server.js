@@ -1657,6 +1657,8 @@ async function emptyTokenAccounts(owner, mint) {
 }
 async function reclaimTokenAccountRent(mint = null) {
   const kp = loadAutotradeKeypair(); if (!kp) return 0;
+  // Closing an account refunds its rent, but the fee is paid up front, so an empty wallet can't do it.
+  try { const b = await rpcCall("getBalance", [kp.publicKey.toBase58(), { commitment: "confirmed" }]); if ((b?.value || 0) < 10000) return 0; } catch {}
   const empties = await emptyTokenAccounts(kp.publicKey.toBase58(), mint);
   const n = await closeTokenAccounts(empties);
   if (n) console.log("Reclaimed rent from " + n + " empty token account(s)" + (mint ? " for " + mint : ""));
