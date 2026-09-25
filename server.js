@@ -633,6 +633,13 @@ function exitStudy(rows, costPct) {
 // Each call is scored under the two exits being tested in practice (quick profit / free ride) plus
 // "reached 2x within 4h". Every feature is split into buckets and each bucket is reported for the
 // older and newer half of the data separately; a bucket only matters if it holds up in both.
+// Price feeds occasionally glitch (a pool migrating, a mispriced pair): a jump of 5x+ between two
+// consecutive readings a minute apart is treated as bad data and the whole path is left out.
+function cleanPath(entry, path) {
+  let prev = entry;
+  for (const pt of path) { if (pt.p > prev * 5) return null; prev = pt.p; }
+  return path;
+}
 function researchOutcome(entry, path) {
   const sc = simulateExit(entry, path, EXIT_VARIANTS.scalp25), fr = simulateExit(entry, path, EXIT_VARIANTS.freeRideNoStop);
   const in60 = path.filter(pt => pt.t <= 60 * 60000);
@@ -664,10 +671,39 @@ const RESEARCH_BUCKETS = {
   risk: [["none", r => r.risk == null], ["0-1", r => r.risk != null && r.risk <= 1], ["1-10", r => r.risk > 1 && r.risk <= 10], ["10-45", r => r.risk > 10]],
   hourUtc: [["00-05", r => new Date(r.ts).getUTCHours() < 6], ["06-11", r => { const h = new Date(r.ts).getUTCHours(); return h >= 6 && h < 12; }], ["12-17", r => { const h = new Date(r.ts).getUTCHours(); return h >= 12 && h < 18; }], ["18-23", r => new Date(r.ts).getUTCHours() >= 18]]
 };
+// Candidate entry conditions, chosen from the single-feature results. Every combination is scored in
+// three time slices; only combinations that make money in all three are worth a practice test.
+const RESEARCH_CONDITIONS = {
+  atHigh: r => r.rangePos30 != null && r.rangePos30 >= 0.97,
+  buyers60: r => r.buyRatio != null && r.buyRatio >= 0.6,
+  liq15to40k: r => r.liq >= 15000 && r.liq < 40000,
+  under3kTrades: r => r.trades != null && r.trades < 3000,
+  mcap30to150k: r => r.mcap != null && r.mcap >= 30000 && r.mcap < 150000,
+  under5min: r => r.ageMin != null && r.ageMin < 5,
+  rising5m: r => r.preM5 != null && r.preM5 > 0
+};
+function comboStudy(data) {
+  const names = Object.keys(RESEARCH_CONDITIONS), out = [];
+  const third = Math.ceil(data.length / 3);
+  const avg = (xs, k) => { const v = xs.map(x => x.o[k]).filter(x => x != null); return v.length ? +(v.reduce((a, b) => a + b, 0) / v.length).toFixed(1) : null; };
+  for (let mask = 1; mask < (1 << names.length); mask++) {
+    const use = names.filter((_, i) => mask & (1 << i));
+    if (use.length > 4) continue;
+    const idx = data.map((r, i) => use.every(n => RESEARCH_CONDITIONS[n](r)) ? i : -1).filter(i => i >= 0);
+    if (idx.length < 30) continue;
+    const pick = idx.map(i => data[i]), slices = [0, 1, 2].map(k => idx.filter(i => Math.floor(i / third) === k).map(i => data[i]));
+    const sc = slices.map(sl => avg(sl, "scalp")), fr = slices.map(sl => avg(sl, "free"));
+    out.push({ rule: use.join("+"), n: pick.length, perThird: slices.map(sl => sl.length), quickProfit: avg(pick, "scalp"), quickProfitThirds: sc, freeRide: avg(pick, "free"), freeRideThirds: fr,
+      quickProfitWorstThird: Math.min(...sc.map(v => v ?? -999)), freeRideWorstThird: Math.min(...fr.map(v => v ?? -999)) });
+  }
+  const top = k => [...out].sort((a, b) => b[k] - a[k]).slice(0, 8);
+  return { tested: out.length, bestQuickProfit: top("quickProfitWorstThird"), bestFreeRide: top("freeRideWorstThird") };
+}
 async function runEntryResearch(rows) {
-  const data = rows.map(r => ({ ...r, o: researchOutcome(r.entryPrice, r.path) })).filter(r => r.o.scalp != null);
+  const data = rows.map(r => ({ ...r, path: cleanPath(r.entryPrice, r.path) })).filter(r => r.path).map(r => ({ ...r, o: researchOutcome(r.entryPrice, r.path) })).filter(r => r.o.scalp != null);
   const features = {};
   for (const [name, buckets] of Object.entries(RESEARCH_BUCKETS)) features[name] = buckets.map(([label, fn]) => bucketStats(label, data.filter(fn)));
+  try { console.log("AUTOTRADE_RESEARCH_COMBOS " + JSON.stringify(comboStudy(data))); } catch (e) { console.error("combo study failed:", e.message); }
   console.log("AUTOTRADE_RESEARCH_FEATURES " + JSON.stringify({ columns: ["bucket", "n", "quickProfitAvg%", "quickProfitWin%", "freeRideAvg%", "reached2x%", "quickProfitOlderHalf", "quickProfitNewerHalf"], all: bucketStats("all calls", data), features }));
   // Baseline: tokens the scanner did NOT call, bought at their first sighting with $10k+ liquidity.
   // If these do about as well as the calls, the score isn't picking anything.
@@ -681,7 +717,7 @@ async function runEntryResearch(rows) {
     const obs = await pool.query(`SELECT mint, ts, price FROM token_observations WHERE mint = ANY($1) AND price > 0 ORDER BY mint, ts`, [chunk.map(r => r.mint)]);
     const paths = new Map();
     for (const o of obs.rows) { const f = byMint.get(o.mint), t = new Date(o.ts).getTime() - new Date(f.ts).getTime(); if (t <= 0 || t > 245 * 60000) continue; let a = paths.get(o.mint); if (!a) paths.set(o.mint, a = []); a.push({ t, p: +o.price }); }
-    for (const [mint, path] of paths) { const o = researchOutcome(+byMint.get(mint).price, path); if (o.scalp != null) base.push({ o }); }
+    for (const [mint, path] of paths) { const entry = +byMint.get(mint).price, clean = cleanPath(entry, path); if (!clean) continue; const o = researchOutcome(entry, clean); if (o.scalp != null) base.push({ o }); }
   }
   console.log("AUTOTRADE_RESEARCH_BASELINE " + JSON.stringify({ uncalledTokensAvailable: firsts.length, sampled: sample.length, calls: bucketStats("scanner calls", data), uncalledFirstSighting: bucketStats("uncalled, first sighting", base) }));
 }
