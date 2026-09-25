@@ -527,6 +527,92 @@ function simulateBacktestTrade(entry, path, stopPct, maxHoldMin) {
   return null;
 }
 
+// Exit-strategy study: the same entries replayed under different exit rules, to answer "would a
+// wider stop / letting winners run / buying later have made money?" with data instead of hunches.
+// x: { stopPct (null = none), graceMin + graceStopPct (looser stop right after entry), ladder
+// [{ multiple, sellPct, stopAfter }], trailPct (stop this far below the peak once a rung is hit),
+// maxHoldMin }. Returns gross multiple, or null if the path is too short to judge.
+function simulateExit(entry, path, x) {
+  let remaining = 1, realized = 0, taken = 0, peak = 1;
+  const ladder = x.ladder || [];
+  for (const pt of path) {
+    const m = pt.p / entry;
+    if (pt.t > x.maxHoldMin * 60000) return { gross: realized + remaining * m, reason: "time" };
+    peak = Math.max(peak, m);
+    let stop = x.stopPct == null ? 0 : 1 - x.stopPct / 100;
+    if (x.graceMin && pt.t < x.graceMin * 60000) stop = x.graceStopPct == null ? 0 : 1 - x.graceStopPct / 100;
+    if (taken) {
+      stop = Math.max(stop, ladder[taken - 1].stopAfter ?? 0);
+      if (x.trailPct) stop = Math.max(stop, peak * (1 - x.trailPct / 100));
+    }
+    if (m <= stop) return { gross: realized + remaining * m, reason: taken ? "trail" : "stop", at: pt.t };
+    while (taken < ladder.length && m >= ladder[taken].multiple) { const q = Math.min(remaining, ladder[taken].sellPct / 100); realized += q * m; remaining -= q; taken++; }
+    if (remaining <= 1e-9) return { gross: realized, reason: "sold out" };
+  }
+  const last = path[path.length - 1];
+  if (last && last.t >= 20 * 60000) return { gross: realized + remaining * (last.p / entry), reason: "data end" };
+  return null;
+}
+const CURRENT_LADDER = TP_LADDER.map(r => ({ ...r }));
+const EXIT_VARIANTS = {
+  current: { stopPct: 12, ladder: CURRENT_LADDER, maxHoldMin: 240 },
+  stop25: { stopPct: 25, ladder: CURRENT_LADDER, maxHoldMin: 240 },
+  stop40: { stopPct: 40, ladder: CURRENT_LADDER, maxHoldMin: 240 },
+  grace10: { stopPct: 12, graceMin: 10, graceStopPct: 50, ladder: CURRENT_LADDER, maxHoldMin: 240 },
+  freeRide: { stopPct: 30, ladder: [{ multiple: 2, sellPct: 50, stopAfter: 1.0 }], trailPct: 40, maxHoldMin: 240 },
+  freeRideNoStop: { stopPct: null, ladder: [{ multiple: 2, sellPct: 50, stopAfter: 1.0 }], trailPct: 50, maxHoldMin: 240 },
+  moonbag: { stopPct: 20, ladder: [{ multiple: 1.5, sellPct: 25, stopAfter: 1.0 }, { multiple: 3, sellPct: 25, stopAfter: 1.5 }], trailPct: 50, maxHoldMin: 240 },
+  holdOnly: { stopPct: null, ladder: [], maxHoldMin: 240 },
+  scalp25: { stopPct: 10, ladder: [{ multiple: 1.25, sellPct: 100 }], maxHoldMin: 60 }
+};
+// Entry timing variants: buy at the call, or wait. "confirm5": buy ~5 min later only if the price is
+// still at/above the call price. "dip15": buy the first time within 30 min that it trades 15% below.
+function entryPoint(kind, callPrice, path) {
+  if (kind === "atCall") return { entry: callPrice, path };
+  let i = -1;
+  if (kind === "confirm5") { i = path.findIndex(pt => pt.t >= 5 * 60000); if (i >= 0 && path[i].p < callPrice) i = -1; }
+  if (kind === "dip15") i = path.findIndex(pt => pt.t <= 30 * 60000 && pt.p <= callPrice * 0.85);
+  if (i < 0) return null;
+  const t0 = path[i].t;
+  return { entry: path[i].p, path: path.slice(i + 1).map(pt => ({ t: pt.t - t0, p: pt.p })) };
+}
+function exitStudy(rows, costPct) {
+  const stats = arr => {
+    if (!arr.length) return { n: 0 };
+    const s = [...arr].sort((a, b) => a - b), sum = arr.reduce((a, b) => a + b, 0);
+    return { n: arr.length, winRatePct: +(arr.filter(v => v > 0).length / arr.length * 100).toFixed(1), avgNetPct: +(sum / arr.length).toFixed(2),
+      medianNetPct: +s[Math.floor(s.length / 2)].toFixed(1), best: +s[s.length - 1].toFixed(0), worst: +s[0].toFixed(0),
+      bigWins: arr.filter(v => v >= 100).length, bigWinShareOfProfitPct: sum > 0 ? +(arr.filter(v => v >= 100).reduce((a, b) => a + b, 0) / arr.filter(v => v > 0).reduce((a, b) => a + b, 0) * 100).toFixed(0) : null };
+  };
+  const split = Math.floor(rows.length * 0.7), out = [];
+  for (const kind of ["atCall", "confirm5", "dip15"]) for (const [name, x] of Object.entries(EXIT_VARIANTS)) {
+    if (kind !== "atCall" && !["current", "freeRide", "moonbag", "holdOnly"].includes(name)) continue;
+    const all = [], first = [], last = [];
+    rows.forEach((r, i) => {
+      const e = entryPoint(kind, r.entryPrice, r.path); if (!e) return;
+      const sim = simulateExit(e.entry, e.path, x); if (!sim) return;
+      const net = (sim.gross - 1) * 100 - costPct;
+      all.push(net); (i < split ? first : last).push(net);
+    });
+    out.push({ entry: kind, exit: name, all: stats(all), older70: stats(first).avgNetPct ?? null, newer30: stats(last).avgNetPct ?? null });
+  }
+  // "It hit the stop, then pumped": of trades the current rules stopped out, where did the price go after?
+  let stopped = 0, laterAbove1_5 = 0, laterAbove2 = 0, laterBelowHalf = 0, recoveredToEntry = 0;
+  for (const r of rows) {
+    const sim = simulateExit(r.entryPrice, r.path, EXIT_VARIANTS.current);
+    if (!sim || sim.reason !== "stop") continue;
+    stopped++;
+    const rest = r.path.filter(pt => pt.t > sim.at).map(pt => pt.p / r.entryPrice);
+    if (!rest.length) continue;
+    const hi = Math.max(...rest), lo = Math.min(...rest);
+    if (hi >= 1) recoveredToEntry++;
+    if (hi >= 1.5) laterAbove1_5++;
+    if (hi >= 2) laterAbove2++;
+    if (lo <= 0.5) laterBelowHalf++;
+  }
+  return { variants: out, afterStopOut: { stopped, recoveredToEntry, laterAbove1_5, laterAbove2, laterBelowHalf } };
+}
+
 const BACKTEST_EXITS = [];
 for (const stopPct of [12, 20, 30]) for (const maxHoldMin of [60, 240]) BACKTEST_EXITS.push({ stopPct, maxHoldMin });
 const exitKey = e => e.stopPct + "/" + e.maxHoldMin;
@@ -583,7 +669,7 @@ async function runBacktest() {
     const f = typeof c.features === "string" ? JSON.parse(c.features || "{}") : (c.features || {});
     const nets = {};
     for (const e of BACKTEST_EXITS) { const sim = simulateBacktestTrade(entry, after, e.stopPct, e.maxHoldMin); nets[exitKey(e)] = sim ? (sim.gross - 1) * 100 - BACKTEST_COST_PCT : null; }
-    rows.push({ ts: c.ts, score: +c.score || 0, risk: c.risk == null ? null : +c.risk, liq: +c.liquidity || 0, buyRatio: c.buy_ratio == null ? null : +c.buy_ratio,
+    rows.push({ entryPrice: entry, path: after, ts: c.ts, score: +c.score || 0, risk: c.risk == null ? null : +c.risk, liq: +c.liquidity || 0, buyRatio: c.buy_ratio == null ? null : +c.buy_ratio,
       ageMin: f.ageHours != null && f.ageHours < 9000 ? f.ageHours * 60 : null, preM5, nets });
   }
   rows.sort((a, b) => a.ts - b.ts);
@@ -623,6 +709,11 @@ async function runBacktest() {
   console.log("AUTOTRADE_BACKTEST_SUMMARY " + JSON.stringify({ ranAt: lastBacktest.ranAt, tookMs: lastBacktest.tookMs, calls: lastBacktest.calls, entries: lastBacktest.entries, train: train.length, test: test.length, firstEntry: lastBacktest.firstEntry, splitAt: lastBacktest.splitAt, original: lastBacktest.original, current: lastBacktest.current }));
   console.log("AUTOTRADE_BACKTEST_BEST " + JSON.stringify(top));
   console.log("AUTOTRADE_BACKTEST_BREAKDOWN " + JSON.stringify(breakdown));
+  try {
+    const study = exitStudy(rows.filter(r => backtestPasses(r, originalRule)), BACKTEST_COST_PCT);
+    lastBacktest.exitStudy = study;
+    console.log("AUTOTRADE_BACKTEST_EXITS " + JSON.stringify(study));
+  } catch (e) { console.error("exit study failed:", e.message); }
   return lastBacktest;
 }
 
