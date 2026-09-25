@@ -629,6 +629,63 @@ function exitStudy(rows, costPct) {
   return { variants: out, afterStopOut: { stopped, recoveredToEntry, laterAbove1_5, laterAbove2, laterBelowHalf } };
 }
 
+// ---- entry research: which features at the moment of a call predict how it goes afterwards ----
+// Each call is scored under the two exits being tested in practice (quick profit / free ride) plus
+// "reached 2x within 4h". Every feature is split into buckets and each bucket is reported for the
+// older and newer half of the data separately; a bucket only matters if it holds up in both.
+function researchOutcome(entry, path) {
+  const sc = simulateExit(entry, path, EXIT_VARIANTS.scalp25), fr = simulateExit(entry, path, EXIT_VARIANTS.freeRideNoStop);
+  const in60 = path.filter(pt => pt.t <= 60 * 60000);
+  return {
+    scalp: sc ? (sc.gross - 1) * 100 - BACKTEST_COST_PCT : null,
+    free: fr ? (fr.gross - 1) * 100 - BACKTEST_COST_PCT : null,
+    peak60: in60.length ? Math.max(...in60.map(pt => pt.p)) / entry : null,
+    hit2x: path.length && path[path.length - 1].t >= 20 * 60000 ? path.some(pt => pt.p >= entry * 2) : null
+  };
+}
+function bucketStats(label, list) {
+  const avg = (xs, k) => { const v = xs.map(x => x.o[k]).filter(x => x != null); return v.length ? +(v.reduce((a, b) => a + b, 0) / v.length).toFixed(1) : null; };
+  const pct = (xs, k, fn) => { const v = xs.map(x => x.o[k]).filter(x => x != null); return v.length ? Math.round(v.filter(fn).length / v.length * 100) : null; };
+  const half = Math.floor(list.length / 2), a = list.slice(0, half), b = list.slice(half);
+  // [label, n, scalp avg, scalp win%, free-ride avg, reached-2x %, scalp avg older half, scalp avg newer half]
+  return [label, list.length, avg(list, "scalp"), pct(list, "scalp", v => v > 0), avg(list, "free"), pct(list, "hit2x", v => v), avg(a, "scalp"), avg(b, "scalp")];
+}
+const RESEARCH_BUCKETS = {
+  score: [["72-77", r => r.score < 78], ["78-84", r => r.score >= 78 && r.score < 85], ["85-94", r => r.score >= 85 && r.score < 95], ["95+", r => r.score >= 95]],
+  pre5m: [["<-10%", r => r.preM5 != null && r.preM5 < -10], ["-10..0", r => r.preM5 >= -10 && r.preM5 < 0], ["0..8", r => r.preM5 >= 0 && r.preM5 < 8], ["8..20", r => r.preM5 >= 8 && r.preM5 < 20], ["20..50", r => r.preM5 >= 20 && r.preM5 < 50], ["50+", r => r.preM5 >= 50], ["?", r => r.preM5 == null]],
+  pre15m: [["<-10%", r => r.pre15 != null && r.pre15 < -10], ["-10..0", r => r.pre15 >= -10 && r.pre15 < 0], ["0..20", r => r.pre15 >= 0 && r.pre15 < 20], ["20..60", r => r.pre15 >= 20 && r.pre15 < 60], ["60+", r => r.pre15 >= 60], ["?", r => r.pre15 == null]],
+  vsHigh30m: [["at high", r => r.rangePos30 != null && r.rangePos30 >= 0.97], ["-3..-15%", r => r.rangePos30 >= 0.85 && r.rangePos30 < 0.97], ["-15..-30%", r => r.rangePos30 >= 0.7 && r.rangePos30 < 0.85], ["<-30%", r => r.rangePos30 != null && r.rangePos30 < 0.7], ["?", r => r.rangePos30 == null]],
+  ageMin: [["<5", r => r.ageMin != null && r.ageMin < 5], ["5-15", r => r.ageMin >= 5 && r.ageMin < 15], ["15-60", r => r.ageMin >= 15 && r.ageMin < 60], ["1-6h", r => r.ageMin >= 60 && r.ageMin < 360], ["6h+", r => r.ageMin >= 360]],
+  liqUsd: [["<15k", r => r.liq < 15000], ["15-25k", r => r.liq >= 15000 && r.liq < 25000], ["25-40k", r => r.liq >= 25000 && r.liq < 40000], ["40k+", r => r.liq >= 40000]],
+  mcapUsd: [["<30k", r => r.mcap != null && r.mcap < 30000], ["30-60k", r => r.mcap >= 30000 && r.mcap < 60000], ["60-150k", r => r.mcap >= 60000 && r.mcap < 150000], ["150k-1M", r => r.mcap >= 150000 && r.mcap < 1e6], ["1M+", r => r.mcap >= 1e6]],
+  volPerLiq: [["<2", r => r.volLiq != null && r.volLiq < 2], ["2-5", r => r.volLiq >= 2 && r.volLiq < 5], ["5-10", r => r.volLiq >= 5 && r.volLiq < 10], ["10+", r => r.volLiq >= 10]],
+  buyRatio: [["<.50", r => r.buyRatio != null && r.buyRatio < 0.5], [".50-.55", r => r.buyRatio >= 0.5 && r.buyRatio < 0.55], [".55-.60", r => r.buyRatio >= 0.55 && r.buyRatio < 0.6], [".60-.70", r => r.buyRatio >= 0.6 && r.buyRatio < 0.7], [".70+", r => r.buyRatio >= 0.7]],
+  trades1h: [["<200", r => r.trades != null && r.trades < 200], ["200-1k", r => r.trades >= 200 && r.trades < 1000], ["1k-3k", r => r.trades >= 1000 && r.trades < 3000], ["3k+", r => r.trades >= 3000]],
+  risk: [["none", r => r.risk == null], ["0-1", r => r.risk != null && r.risk <= 1], ["1-10", r => r.risk > 1 && r.risk <= 10], ["10-45", r => r.risk > 10]],
+  hourUtc: [["00-05", r => new Date(r.ts).getUTCHours() < 6], ["06-11", r => { const h = new Date(r.ts).getUTCHours(); return h >= 6 && h < 12; }], ["12-17", r => { const h = new Date(r.ts).getUTCHours(); return h >= 12 && h < 18; }], ["18-23", r => new Date(r.ts).getUTCHours() >= 18]]
+};
+async function runEntryResearch(rows) {
+  const data = rows.map(r => ({ ...r, o: researchOutcome(r.entryPrice, r.path) })).filter(r => r.o.scalp != null);
+  const features = {};
+  for (const [name, buckets] of Object.entries(RESEARCH_BUCKETS)) features[name] = buckets.map(([label, fn]) => bucketStats(label, data.filter(fn)));
+  console.log("AUTOTRADE_RESEARCH_FEATURES " + JSON.stringify({ columns: ["bucket", "n", "quickProfitAvg%", "quickProfitWin%", "freeRideAvg%", "reached2x%", "quickProfitOlderHalf", "quickProfitNewerHalf"], all: bucketStats("all calls", data), features }));
+  // Baseline: tokens the scanner did NOT call, bought at their first sighting with $10k+ liquidity.
+  // If these do about as well as the calls, the score isn't picking anything.
+  const called = new Set(rows.map(r => r.mint));
+  const firsts = (await pool.query(`SELECT DISTINCT ON (mint) mint, ts, price FROM token_observations
+    WHERE ts > now() - interval '4 days' AND ts < now() - interval '4 hours' AND price > 0 AND liquidity >= 10000 ORDER BY mint, ts`)).rows.filter(r => !called.has(r.mint));
+  for (let i = firsts.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [firsts[i], firsts[j]] = [firsts[j], firsts[i]]; }
+  const sample = firsts.slice(0, 800), base = [];
+  for (let i = 0; i < sample.length; i += 200) {
+    const chunk = sample.slice(i, i + 200), byMint = new Map(chunk.map(r => [r.mint, r]));
+    const obs = await pool.query(`SELECT mint, ts, price FROM token_observations WHERE mint = ANY($1) AND price > 0 ORDER BY mint, ts`, [chunk.map(r => r.mint)]);
+    const paths = new Map();
+    for (const o of obs.rows) { const f = byMint.get(o.mint), t = new Date(o.ts).getTime() - new Date(f.ts).getTime(); if (t <= 0 || t > 245 * 60000) continue; let a = paths.get(o.mint); if (!a) paths.set(o.mint, a = []); a.push({ t, p: +o.price }); }
+    for (const [mint, path] of paths) { const o = researchOutcome(+byMint.get(mint).price, path); if (o.scalp != null) base.push({ o }); }
+  }
+  console.log("AUTOTRADE_RESEARCH_BASELINE " + JSON.stringify({ uncalledTokensAvailable: firsts.length, sampled: sample.length, calls: bucketStats("scanner calls", data), uncalledFirstSighting: bucketStats("uncalled, first sighting", base) }));
+}
+
 const BACKTEST_EXITS = [];
 for (const stopPct of [12, 20, 30]) for (const maxHoldMin of [60, 240]) BACKTEST_EXITS.push({ stopPct, maxHoldMin });
 const exitKey = e => e.stopPct + "/" + e.maxHoldMin;
@@ -660,7 +717,7 @@ async function runBacktest() {
   if (!dbReady) return null;
   const started = Date.now();
   const calls = (await pool.query(
-    `SELECT mint, flagged_at, score, risk, entry_price, liquidity, buy_ratio, features FROM call_log
+    `SELECT mint, flagged_at, score, risk, entry_price, liquidity, buy_ratio, market_cap, features FROM call_log
      WHERE flagged_at > now() - interval '14 days' AND entry_price > 0 ORDER BY flagged_at`)).rows;
   // One entry per mint per 12h, matching the bot's re-buy cooldown (call_log re-logs every 30 min).
   const lastBy = new Map(), picks = [];
@@ -685,7 +742,12 @@ async function runBacktest() {
     const f = typeof c.features === "string" ? JSON.parse(c.features || "{}") : (c.features || {});
     const nets = {};
     for (const e of BACKTEST_EXITS) { const sim = simulateBacktestTrade(entry, after, e.stopPct, e.maxHoldMin); nets[exitKey(e)] = sim ? (sim.gross - 1) * 100 - BACKTEST_COST_PCT : null; }
-    rows.push({ entryPrice: entry, path: after, ts: c.ts, score: +c.score || 0, risk: c.risk == null ? null : +c.risk, liq: +c.liquidity || 0, buyRatio: c.buy_ratio == null ? null : +c.buy_ratio,
+    // Research-only features from the price history before the call.
+    const near = (mins, tol) => { const target = c.ts - mins * 60000; let best = null; for (const x of series) { if (Math.abs(x[0] - target) <= tol * 60000 && x[0] < c.ts && (!best || Math.abs(x[0] - target) < Math.abs(best[0] - target))) best = x; } return best; };
+    const b15 = near(15, 5), win30 = series.filter(([t]) => t >= c.ts - 30 * 60000 && t < c.ts);
+    const pre15 = b15 ? (entry / b15[1] - 1) * 100 : null;
+    const rangePos30 = win30.length >= 3 ? entry / Math.max(entry, ...win30.map(x => x[1])) : null;
+    rows.push({ entryPrice: entry, path: after, ts: c.ts, mint: c.mint, pre15, rangePos30, mcap: +c.market_cap || null, volLiq: f.volumeLiquidity != null ? +f.volumeLiquidity : null, trades: f.trades != null ? +f.trades : null, score: +c.score || 0, risk: c.risk == null ? null : +c.risk, liq: +c.liquidity || 0, buyRatio: c.buy_ratio == null ? null : +c.buy_ratio,
       ageMin: f.ageHours != null && f.ageHours < 9000 ? f.ageHours * 60 : null, preM5, nets });
   }
   rows.sort((a, b) => a.ts - b.ts);
@@ -730,6 +792,7 @@ async function runBacktest() {
     lastBacktest.exitStudy = study;
     console.log("AUTOTRADE_BACKTEST_EXITS " + JSON.stringify(study));
   } catch (e) { console.error("exit study failed:", e.message); }
+  try { await runEntryResearch(rows.filter(r => r.risk == null || r.risk < 45)); } catch (e) { console.error("entry research failed:", e.message); }
   return lastBacktest;
 }
 
