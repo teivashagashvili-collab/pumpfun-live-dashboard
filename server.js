@@ -218,8 +218,17 @@ async function initDB() {
   } catch (e) { console.error("DB init failed:", e.message); }
 }
 
+// At most one stored price reading per coin every OBSERVATION_MIN_INTERVAL_MS (default 30s). Refresh
+// cycles can revisit a coin every few seconds, and storing all of them filled the 500 MB database
+// volume on 26 Sep 2026. Coins the bot holds are always stored so their price paths stay complete.
+const OBSERVATION_MIN_INTERVAL_MS = Number(process.env.OBSERVATION_MIN_INTERVAL_MS || 30000);
+const lastObservationAt = new Map();
 async function persistObservation(t, p) {
   if (!dbReady || !p) return;
+  const now = Date.now(), last = lastObservationAt.get(t.mint) || 0;
+  if (now - last < OBSERVATION_MIN_INTERVAL_MS && !autotradeHoldsMint(t.mint)) return;
+  lastObservationAt.set(t.mint, now);
+  if (lastObservationAt.size > 5000) { for (const [k, v] of lastObservationAt) if (now - v > 10 * 60000) lastObservationAt.delete(k); }
   try {
     await pool.query(
       `INSERT INTO token_observations(mint,price,market_cap,liquidity,volume_h1,buys_h1,sells_h1,risk,signal,name,symbol,category)
@@ -246,7 +255,7 @@ async function persistentStats() {
 // thousands of rows a week, unbounded, on a Railway disk allowance that isn't unbounded. Nothing
 // reads rows older than a couple hours (persistentStats aggregates, nearestPrice only looks
 // within a call's own resolution window), so old rows are pure disk cost with zero value.
-const OBSERVATION_RETENTION_DAYS = Number(process.env.OBSERVATION_RETENTION_DAYS || 14);
+const OBSERVATION_RETENTION_DAYS = Number(process.env.OBSERVATION_RETENTION_DAYS || 4);
 async function pruneOldObservations() {
   if (!dbReady) return;
   try {
@@ -2497,7 +2506,7 @@ setInterval(() => {
 }, 60000);
 
 setInterval(() => resolveOutcomes().catch(e => console.error("resolveOutcomes failed:", e.message)), 2 * 60000);
-setInterval(() => pruneOldObservations().catch(e => console.error("pruneOldObservations failed:", e.message)), 6 * 60 * 60000); // every 6h
+setInterval(() => pruneOldObservations().catch(e => console.error("pruneOldObservations failed:", e.message)), 60 * 60000); // hourly
 setTimeout(() => runBacktest().catch(e => console.error("runBacktest failed:", e.message)), 90000);
 setTimeout(() => {
   if (!loadAutotradeKeypair()) return;
@@ -2552,7 +2561,14 @@ async function applyPaperReset() {
     } catch (err) { console.error("paper reset failed:", e.mode, err.message); }
   }
 }
-initDB().then(applyPaperReset).then(hydrateAutotradeHeldMints).catch(() => {});
+// The database can be briefly unavailable at boot (restarting, recovering, or full). Retry every 30s
+// instead of running the whole process without persistence until the next deploy.
+async function initDBWithRetry() {
+  await initDB();
+  if (!dbReady && pool) { console.error("Database not ready; retrying in 30s"); setTimeout(() => initDBWithRetry().catch(() => {}), 30000); return; }
+  await applyPaperReset(); await hydrateAutotradeHeldMints(); pruneOldObservations().catch(() => {});
+}
+initDBWithRetry().catch(() => {});
 // Doubles as a restart notice and an end-to-end check that the token and chat ID actually work.
 if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) sendTelegramText("✅ PumpScope started — alerts are on. You'll get a message here for strong picks and for everything the autobot does.")
   .then(ok => console.log(ok ? "Telegram alerts connected" : "Telegram alerts NOT working — check TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID"));
