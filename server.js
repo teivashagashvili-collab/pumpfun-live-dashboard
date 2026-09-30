@@ -572,6 +572,8 @@ function simulateExit(entry, path, x) {
   for (const pt of path) {
     const m = pt.p / entry;
     if (pt.t > x.maxHoldMin * 60000) return { gross: realized + remaining * m, reason: "time" };
+    // noProgressMin: give up on a position that hasn't reached its first profit rung by then.
+    if (x.noProgressMin && !taken && pt.t > x.noProgressMin * 60000) return { gross: realized + remaining * m, reason: "no progress" };
     peak = Math.max(peak, m);
     let stop = x.stopPct == null ? 0 : 1 - x.stopPct / 100;
     if (x.graceMin && pt.t < x.graceMin * 60000) stop = x.graceStopPct == null ? 0 : 1 - x.graceStopPct / 100;
@@ -717,6 +719,49 @@ function comboStudy(data) {
   const top = k => [...out].sort((a, b) => b[k] - a[k]).slice(0, 8);
   return { tested: out.length, bestQuickProfit: top("quickProfitWorstThird"), bestFreeRide: top("freeRideWorstThird") };
 }
+// ---- replay of the practice accounts' own positions ----
+// Every practice position of the last 7 days is replayed from its real entry along the price path
+// recorded while the bot held it (held coins are never evicted, so their paths are complete),
+// under free-ride variants that cut losers early. Answers: would a stop or a "no progress" exit have
+// turned free ride profitable on the coins these rules actually bought?
+const REPLAY_VARIANTS = (() => {
+  const fr = { ladder: [{ multiple: 2, sellPct: 50, stopAfter: 1.0 }], trailPct: 50, maxHoldMin: 240 };
+  const out = { asTraded: { ...fr, stopPct: null } };
+  for (const s of [20, 30, 40, 50]) out["stop" + s] = { ...fr, stopPct: s };
+  for (const h of [15, 30, 60]) { out["noProgress" + h] = { ...fr, stopPct: null, noProgressMin: h }; out["stop30_noProgress" + h] = { ...fr, stopPct: 30, noProgressMin: h }; }
+  out.rung50_stop30 = { ladder: [{ multiple: 1.5, sellPct: 50, stopAfter: 1.0 }], trailPct: 40, maxHoldMin: 240, stopPct: 30 };
+  out.rung50_stop30_np30 = { ...out.rung50_stop30, noProgressMin: 30 };
+  return out;
+})();
+async function runPositionReplay() {
+  const pos = (await pool.query(`SELECT id, mode, mint, opened_at, entry_price_usd, sol_spent, realized_pnl_sol, entry_features FROM autotrade_positions
+    WHERE mode <> 'live' AND status='closed' AND realized_pnl_sol IS NOT NULL AND entry_price_usd > 0 AND opened_at > now() - interval '7 days' ORDER BY opened_at`)).rows;
+  if (!pos.length) return;
+  const mints = [...new Set(pos.map(p => p.mint))], obs = new Map();
+  for (let i = 0; i < mints.length; i += 200) {
+    const r = await pool.query(`SELECT mint, ts, price FROM token_observations WHERE mint = ANY($1) AND ts > now() - interval '8 days' AND price > 0 ORDER BY mint, ts`, [mints.slice(i, i + 200)]);
+    for (const o of r.rows) { let a = obs.get(o.mint); if (!a) obs.set(o.mint, a = []); a.push([new Date(o.ts).getTime(), +o.price]); }
+  }
+  const cost = 5; // realistic round trip at 0.05 SOL: fees + price impact + haircut
+  const byMode = {};
+  for (const p of pos) {
+    const t0 = new Date(p.opened_at).getTime(), entry = +p.entry_price_usd;
+    const path = (obs.get(p.mint) || []).filter(([t]) => t > t0 && t <= t0 + 245 * 60000).map(([t, px]) => ({ t: t - t0, p: px }));
+    if (path.length < 3) continue;
+    const m = (byMode[p.mode] ||= { n: 0, actual: [], variants: {} });
+    m.n++; m.actual.push(Number(p.realized_pnl_sol) / Number(p.sol_spent) * 100);
+    for (const [k, x] of Object.entries(REPLAY_VARIANTS)) {
+      const sim = simulateExit(entry, path, x); if (!sim) continue;
+      (m.variants[k] ||= []).push((sim.gross - 1) * 100 - cost);
+    }
+  }
+  const summarize = arr => { if (!arr?.length) return null; const h = Math.floor(arr.length / 2), avg = a => a.length ? +(a.reduce((x, y) => x + y, 0) / a.length).toFixed(1) : null;
+    return { n: arr.length, avg: avg(arr), win: Math.round(arr.filter(v => v > 0).length / arr.length * 100), firstHalf: avg(arr.slice(0, h)), secondHalf: avg(arr.slice(h)) }; };
+  const out = {};
+  for (const [mode, m] of Object.entries(byMode)) out[mode] = { replayed: m.n, actualAvgPct: summarize(m.actual), variants: Object.fromEntries(Object.entries(m.variants).map(([k, v]) => [k, summarize(v)])) };
+  console.log("AUTOTRADE_RESEARCH_REPLAY " + JSON.stringify({ costPct: cost, note: "entry = DexScreener price at buy; paths from token_observations while held", modes: out }));
+}
+
 async function runEntryResearch(rows) {
   const data = rows.map(r => ({ ...r, path: cleanPath(r.entryPrice, r.path) })).filter(r => r.path).map(r => ({ ...r, o: researchOutcome(r.entryPrice, r.path) })).filter(r => r.o.scalp != null);
   const features = {};
@@ -847,6 +892,7 @@ async function runBacktest() {
     console.log("AUTOTRADE_BACKTEST_EXITS " + JSON.stringify(study));
   } catch (e) { console.error("exit study failed:", e.message); }
   try { await runEntryResearch(rows.filter(r => r.risk == null || r.risk < 45)); } catch (e) { console.error("entry research failed:", e.message); }
+  try { await runPositionReplay(); } catch (e) { console.error("position replay failed:", e.message); }
   return lastBacktest;
 }
 
@@ -1739,7 +1785,9 @@ function entryFeatures(t) {
     buysH1: +p.txns?.h1?.buys || 0, sellsH1: +p.txns?.h1?.sells || 0, m5: +p.priceChange?.m5 || 0, h1: +p.priceChange?.h1 || 0,
     pairAgeMin: p.pairCreatedAt ? Math.round((Date.now() - p.pairCreatedAt) / 60000) : null,
     top10Pct: t.rug?.top10HolderPct ?? null, creatorPct: t.rug?.creatorHoldingPct ?? null,
-    bundleCluster: t.bundle?.clusterRatio ?? null, category: t.category || null
+    bundleCluster: t.bundle?.clusterRatio ?? null, category: t.category || null,
+    creator: t.creator || null, creatorLaunches: t.creatorRep?.launches ?? null, creatorRugged: t.creatorRep?.rugged ?? null, creatorRugRate: t.creatorRep?.rugRate ?? null,
+    dexId: p.dexId || null
   };
 }
 
